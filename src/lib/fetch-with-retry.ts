@@ -30,6 +30,12 @@ const DEFAULT_RETRIES = 3
 const DEFAULT_RETRY_DELAY = 1000
 const DEFAULT_RETRY_ON = [429, 503, 504]
 
+// 법제처 OPEN API가 Node 기본 UA(undici)를 봇으로 분류해 거부하므로
+// 일반 브라우저 UA로 호출. LAW_USER_AGENT 환경변수로 override 가능.
+const DEFAULT_USER_AGENT =
+  process.env.LAW_USER_AGENT ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
 /**
  * Fetch with automatic retry and timeout
  */
@@ -51,9 +57,13 @@ export async function fetchWithRetry(
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), timeout)
 
+    const headers = new Headers(fetchOptions.headers)
+    if (!headers.has("user-agent")) headers.set("user-agent", DEFAULT_USER_AGENT)
+
     try {
       const response = await fetch(url, {
         ...fetchOptions,
+        headers,
         signal: controller.signal,
       })
 
