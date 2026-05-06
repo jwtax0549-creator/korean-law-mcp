@@ -103,7 +103,15 @@
 > 모든 결과 끝에 **"이어서 할 수 있는 조회"**가 제안됩니다. 복사해서 바로 이어가세요.
 
 <details>
-<summary>v3.2.1~v3.5.4 변경 이력</summary>
+<summary>v3.2.1~v3.5.5 변경 이력</summary>
+
+**v3.5.5** — 법제처 API 봇 차단 우회 (긴급 핫픽스)
+
+법제처 OPEN API가 Node.js 기본 User-Agent(`undici/...`)를 봇으로 분류해 거부하기 시작 → fly.dev/Vercel 등 모든 클라우드 호스팅에서 `[EXTERNAL_API_ERROR] fetch failed` 또는 "사용자 정보 검증에 실패하였습니다" XML로 죽는 현상.
+
+- **`fetch-with-retry.ts`에 일반 브라우저 UA 기본 헤더 주입** — 호출자 코드 변경 0, 한 줄 패치로 모든 도구 복구. `LAW_USER_AGENT` 환경변수로 override 가능
+- 에러 메시지가 "정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요"여서 IP 화이트리스트 차단으로 오인되기 쉬웠음 — 실제 원인은 UA 검증
+- claude.ai 커스텀 커넥터로 `https://korean-law-mcp.fly.dev/mcp?oc=...` 사용하던 사용자 즉시 영향. v3.5.5 배포로 자동 복구
 
 **v3.5.4** — 실사용 피드백 반영: NOT_FOUND 명시 시그널 전면 도입
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [3.5.5] - 2026-05-06
+
+### Fixed (긴급 핫픽스: 법제처 API 봇 차단 우회)
+
+법제처 OPEN API가 Node.js 기본 User-Agent(`undici/...`)를 봇으로 분류해 거부하기 시작. fly.dev / Vercel 등 모든 클라우드 호스팅에서 `[EXTERNAL_API_ERROR] fetch failed` 또는 "사용자 정보 검증에 실패하였습니다" XML로 모든 도구가 죽는 현상.
+
+**원인 진단의 함정**: 에러 메시지가 "정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요"라서 IP 화이트리스트 차단으로 오인되기 쉬움. 실제로는 IP 무관, **User-Agent 검증**. 같은 IP·같은 OC 키라도 브라우저 UA로는 통과, Node fetch UA로는 거부.
+
+### Changed
+- **`lib/fetch-with-retry.ts`** — 일반 Chrome 브라우저 UA를 기본 헤더로 주입. 옵션으로 넘어온 `headers`에 `user-agent`가 없을 때만 자동 추가 → 호출자 코드 변경 0
+- `LAW_USER_AGENT` 환경변수로 override 가능 (정책 변경 시 빠른 대응)
+
+### Impact
+- claude.ai 커스텀 커넥터(`https://korean-law-mcp.fly.dev/mcp?oc=...`)로 사용하던 모든 사용자 즉시 영향 → v3.5.5 배포로 자동 복구
+- npm 글로벌 설치(`npm i -g korean-law-mcp`) 사용자도 동일하게 적용
+- IP 화이트리스트 / 한국 호스팅 이전 같은 큰 작업 불필요
+
 ## [Unreleased] - 2026-04-26
 
 ### Docs (issue #29: 플러그인 설치 시 SSH 키 미설정 사용자 지원)
