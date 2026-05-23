@@ -1,5 +1,31 @@
 # Changelog
 
+## [4.0.5] - 2026-05-23
+
+### Security — 의존성 취약점 일괄 패치 (High 4건 → 0건)
+
+`npm audit` High 등급 4개 패키지 일괄 업그레이드. 모두 semver-major 변경 없는 patch/minor 업데이트로 안전.
+
+- **@xmldom/xmldom 0.9.8 → 0.9.10** (직접 의존성 + kordoc 간접, dedupe됨)
+  - [GHSA-wh4c-j3r5-mjhp](https://github.com/advisories/GHSA-wh4c-j3r5-mjhp) — XML injection via unsafe CDATA serialization
+  - [GHSA-2v35-w6hq-6mfw](https://github.com/advisories/GHSA-2v35-w6hq-6mfw) — Uncontrolled recursion in XML serialization (DoS)
+  - [GHSA-f6ww-3ggp-fr8h](https://github.com/advisories/GHSA-f6ww-3ggp-fr8h) — XML injection through unvalidated DocumentType serialization
+  - [GHSA-x6wf-f3px-wcqx](https://github.com/advisories/GHSA-x6wf-f3px-wcqx) — XML node injection through unvalidated processing instruction serialization
+  - [GHSA-j759-j44w-7fr8](https://github.com/advisories/GHSA-j759-j44w-7fr8) — XML node injection through unvalidated comment serialization
+- **@hono/node-server 1.19.9 → 1.19.14** (MCP SDK 간접) — 정적 미들웨어 경로 우회 (당 프로젝트는 미사용이나 트리 정리)
+- **express-rate-limit 8.2.1 → 8.5.2** (MCP SDK 간접) — IPv4-mapped IPv6 우회로 rate limit 회피
+- **fast-uri 3.1.0 → 3.1.2** (MCP SDK → ajv 간접) — path traversal / host confusion
+
+### 검증
+- `npm audit` → **found 0 vulnerabilities**
+- `npm run build` → TypeScript 빌드 통과
+- `@xmldom/xmldom` DOMParser smoke test 통과 (`hwpx-parser` 사용 코드 영향 없음)
+- xmldom DOMParser API는 0.9.x 내 안정 — `lib/annex-file-parser.ts`의 HWPX 파싱 동작 변경 없음
+
+### Files
+- 수정: [package.json](package.json) (version), [package-lock.json](package-lock.json) (의존성 트리)
+- 코드 변경 없음
+
 ## [4.0.4] - 2026-05-19
 
 ### Added — 약어 부분 매칭 (`extractEmbeddedAliases`)

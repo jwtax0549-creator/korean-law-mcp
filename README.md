@@ -49,6 +49,10 @@ graph LR
 
 → STEP 1 상황진단(주택임대차보호법 자동 식별) → STEP 2 권리/구제수단(판례) → STEP 3 신청기관/기한(행정규칙+해석) → STEP 4 필요서류/양식(별표) → STEP 5 함정/주의(시효·법률구조공단). 평소 말투 그대로 → 실행 가능한 단계로 변환.
 
+### + v4.0.5 — 의존성 취약점 일괄 패치 (Security)
+
+`npm audit` High 4건(@xmldom/xmldom 5건의 XML injection + DoS, @hono/node-server 경로 우회, express-rate-limit IPv6 우회, fast-uri path traversal) 일괄 패치. 모두 semver-major 변경 없는 patch/minor 업데이트. `npm audit` → **0 vulnerabilities**. 코드 변경 0건. 자세한 GHSA 목록은 [CHANGELOG](CHANGELOG.md#405---2026-05-23) 참조.
+
 ### + v4.0.4 — 약어 부분 매칭
 
 기존 약어 처리는 query 전체가 등록 약어와 정확 일치할 때만 동작 ("화관법" → "화학물질관리법"). v4.0.4는 약어가 다른 토큰과 **결합된** query도 풀네임 변형으로 자동 확장.
