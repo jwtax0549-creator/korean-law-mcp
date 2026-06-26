@@ -9,6 +9,7 @@ import { z } from "zod"
 import type { LawApiClient } from "./lib/api-client.js"
 import type { McpTool } from "./lib/types.js"
 import { formatToolError } from "./lib/errors.js"
+import { maskSensitiveUrl } from "./lib/fetch-with-retry.js"
 import { discoverTools, DiscoverToolsSchema, executeTool, ExecuteToolSchema, setAllToolsRef } from "./tools/meta-tools.js"
 import { searchDecisions, SearchDecisionsSchema, getDecisionText, GetDecisionTextSchema } from "./tools/unified-decisions.js"
 
@@ -814,13 +815,13 @@ export function registerTools(server: Server, apiClient: LawApiClient) {
       const input = tool.schema.parse(args)
       const result = await tool.handler(apiClient, input)
       return {
-        content: result.content.map(c => ({ type: "text" as const, text: c.text })),
+        content: result.content.map(c => ({ type: "text" as const, text: maskSensitiveUrl(c.text) })),
         isError: result.isError
       }
     } catch (error) {
       const errResult = formatToolError(error, name)
       return {
-        content: errResult.content.map(c => ({ type: "text" as const, text: c.text })),
+        content: errResult.content.map(c => ({ type: "text" as const, text: maskSensitiveUrl(c.text) })),
         isError: true
       }
     }
