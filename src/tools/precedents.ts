@@ -209,13 +209,13 @@ function hasSubstantiveTaxlawBody(text: string): boolean {
   return !/(내용없음|본문없음|조회된내용이없습니다|자료가없습니다)/.test(compact)
 }
 
-function normalizeTaxlawBodyCandidate(value: unknown): string {
+export function normalizeTaxlawBodyCandidate(value: unknown): string {
   if (typeof value !== "string") return ""
   const body = normalizeHtmlText(value)
   return hasSubstantiveTaxlawBody(body) ? body : ""
 }
 
-function extractTaxlawEditorBody(actionData: any): string {
+export function extractTaxlawEditorBody(actionData: any): string {
   const editorList = Array.isArray(actionData.dcmHwpEditorDVOList)
     ? actionData.dcmHwpEditorDVOList
     : []
@@ -268,7 +268,7 @@ async function fetchText(response: Response, context: string): Promise<string> {
   return text
 }
 
-async function fetchTaxlawAction(ntstDcmId: string, referer: string): Promise<any> {
+export async function fetchTaxlawAction(ntstDcmId: string, referer: string): Promise<any> {
   const body = new URLSearchParams({
     actionId: "ASIQTB002PR01",
     paramData: JSON.stringify({ dcmDVO: { ntstDcmId } }),

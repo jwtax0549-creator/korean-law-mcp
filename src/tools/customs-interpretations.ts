@@ -3,6 +3,7 @@ import type { LawApiClient } from "../lib/api-client.js";
 import { truncateResponse } from "../lib/schemas.js";
 import { parseSearchXML, extractTag } from "../lib/xml-parser.js";
 import { formatToolError, noResultHint } from "../lib/errors.js";
+import { fetchTaxlawAction, extractTaxlawEditorBody, normalizeTaxlawBodyCandidate } from "./precedents.js";
 
 // 관세청(kcsCgmExpc)·국세청(ntsCgmExpc) 응답 구조가 동일하므로 target만 분기해 재사용
 type CgmExpcTarget = "kcsCgmExpc" | "ntsCgmExpc";
@@ -10,6 +11,22 @@ const TARGET_LABEL: Record<CgmExpcTarget, string> = {
   kcsCgmExpc: "관세청",
   ntsCgmExpc: "국세청",
 };
+
+/** 국세청 검색은 제목(section=itmNm)만 대상이라 관련 예규가 뒤로 밀린다 — 표시 하한을 올려 누락 방지 */
+const NTS_MIN_DISPLAY = 50;
+
+/** 국세청 문서ID(ntstDcmId) — 법제처 일련번호와 다른 체계. 본문 조회는 이 값으로만 가능 */
+const NTST_DCM_ID_PATTERN = /^\d{15,20}$/;
+
+/** 법령해석상세링크(taxlaw.nts.go.kr/...?ntstDcmId=...)에서 본문 조회용 문서ID를 뽑는다 */
+function extractNtstDcmId(link: string | undefined): string {
+  if (!link) return "";
+  try {
+    return new URL(link).searchParams.get("ntstDcmId") || "";
+  } catch {
+    return "";
+  }
+}
 
 // Customs legal interpretation search tool - Search for customs law interpretations
 export const searchCustomsInterpretationsSchema = z.object({
@@ -49,8 +66,11 @@ async function searchCgmExpcByTarget(
 ): Promise<{ content: Array<{ type: string, text: string }>, isError?: boolean }> {
   const orgLabel = TARGET_LABEL[target];
   try {
+    // 국세청은 제목검색뿐이라 상위 20건에 핵심 예규가 안 잡히는 사례가 많다 → 하한 상향
+    const requested = args.display || 20;
+    const display = target === "ntsCgmExpc" ? Math.max(requested, NTS_MIN_DISPLAY) : requested;
     const extraParams: Record<string, string> = {
-      display: (args.display || 20).toString(),
+      display: display.toString(),
       page: (args.page || 1).toString(),
     };
     if (args.query) extraParams.query = args.query;
@@ -73,6 +93,7 @@ async function searchCgmExpcByTarget(
       (content) => ({
         법령해석일련번호: extractTag(content, "법령해석일련번호"),
         안건명: extractTag(content, "안건명"),
+        안건번호: extractTag(content, "안건번호"),
         질의기관코드: extractTag(content, "질의기관코드"),
         질의기관명: extractTag(content, "질의기관명"),
         해석기관코드: extractTag(content, "해석기관코드"),
@@ -92,16 +113,26 @@ async function searchCgmExpcByTarget(
 
     for (const expc of expcs) {
       output += `[${expc.법령해석일련번호}] ${expc.안건명}\n`;
+      if (expc.안건번호) {
+        output += `  문서번호: ${expc.안건번호}\n`;
+      }
       output += `  질의기관: ${expc.질의기관명 || "N/A"}\n`;
       output += `  해석기관: ${expc.해석기관명 || "N/A"}\n`;
       output += `  해석일자: ${expc.해석일자 || "N/A"}\n`;
       if (expc.법령해석상세링크) {
         output += `  링크: ${expc.법령해석상세링크}\n`;
+        const ntstDcmId = target === "ntsCgmExpc" ? extractNtstDcmId(expc.법령해석상세링크) : "";
+        if (ntstDcmId) {
+          output += `  ntstDcmId: ${ntstDcmId}  ← 본문: get_decision_text(domain="nts", id="${ntstDcmId}")\n`;
+        }
       }
       output += `\n`;
     }
 
-    // 후속 도구 안내 제거 (LLM이 이미 도구 목록을 알고 있음)
+    if (target === "ntsCgmExpc" && totalCount > expcs.length) {
+      output += `⚠️ 총 ${totalCount}건 중 ${expcs.length}건만 표시. 국세청 검색은 **제목만** 대상이고 관련도순이 아니라, 핵심 예규가 뒤에 묻힐 수 있습니다.\n`;
+      output += `   빠짐 없이 보려면 display를 올리거나(최대 100) page를 넘기세요. 제목에 없는 말로는 검색되지 않으니 문서번호·다른 표현으로도 검색하세요.\n`;
+    }
 
     return {
       content: [{
@@ -133,24 +164,83 @@ export async function getCustomsInterpretationText(
 /**
  * 국세청 법령해석 본문 조회 (#35)
  *
- * 법제처 OPEN API는 국세청 법령해석에 대해 **목록 조회만 제공**한다.
- * 본문 조회 endpoint(`lawService.do?target=ntsCgmExpc`)는 존재하지 않으며,
- * 검색 응답의 `법령해석상세링크`(taxlaw.nts.go.kr) 외부 페이지로만 본문 확인 가능.
+ * 법제처 OPEN API는 국세청 법령해석에 **목록 조회만 제공**한다(`lawService.do?target=ntsCgmExpc` 없음).
+ * 대신 검색 응답의 `법령해석상세링크`에 담긴 국세청 문서ID(`ntstDcmId`)로
+ * 국세청 조회 endpoint에 직접 질의해 본문을 가져온다(판례 HTML 폴백과 동일 경로 재사용).
  *
- * → 별도 호출 없이 외부 링크 안내 메시지 반환 (LLM 환각 방지).
+ * ⚠️ 국세청 문서는 두 본문이 성격이 정반대다 — 섞으면 안 된다:
+ *   - `dcmDVO.ntstDcmCntn`      = **국세청 회신**(답변).           ← 핵심
+ *   - `dcmHwpEditorDVOList`     = **납세자 질의서**(`qstn/...`).   ← 참고
+ * 판례용 `extractTaxlawBody()`는 에디터를 우선하므로 여기서 쓰면 회신이 통째로 유실된다.
  */
 export async function getNtsInterpretationText(
   _apiClient: LawApiClient,
   args: GetCustomsInterpretationTextInput
 ): Promise<{ content: Array<{ type: string, text: string }>, isError?: boolean }> {
-  const text =
-    `[NOT_SUPPORTED] 국세청 법령해석은 법제처 OPEN API에서 본문 조회를 제공하지 않습니다.\n\n` +
-    `해석례 일련번호: ${args.id}\n` +
-    `법제처 OPEN API target 'ntsCgmExpc'는 lawSearch.do 목록 조회만 지원합니다.\n` +
-    `본문은 search_decisions(domain="nts") 결과의 '법령해석상세링크'(taxlaw.nts.go.kr) 외부 페이지에서 확인하세요.\n` +
-    `(상세링크의 ntstDcmId는 법제처 일련번호와 다른 별도 식별자라 자동 변환 불가.)\n\n` +
-    `⚠️ LLM은 본문을 추측/생성하지 말고, 검색 결과에 포함된 링크를 그대로 사용자에게 안내하세요.`;
-  return { content: [{ type: "text", text }], isError: true };
+  // 법제처 일련번호(짧은 숫자)로는 국세청 본문을 찾을 수 없다 — 변환식도 없다
+  if (!NTST_DCM_ID_PATTERN.test(args.id)) {
+    const text =
+      `[NEED_NTST_DCM_ID] 국세청 법령해석 본문은 국세청 문서ID(ntstDcmId)로 조회합니다.\n\n` +
+      `받은 id: ${args.id} — 법제처 일련번호로 보이며, 본문 조회에는 쓸 수 없습니다(두 번호 사이에 변환식이 없습니다).\n` +
+      `search_decisions(domain="nts") 결과의 'ntstDcmId' 값을 id로 넣어 다시 호출하세요.\n` +
+      `예: get_decision_text(domain="nts", id="010000000000050559")`;
+    return { content: [{ type: "text", text }] };
+  }
+
+  try {
+    const referer = `https://taxlaw.nts.go.kr/qt/USEQTA002P.do?ntstDcmId=${args.id}`;
+    const actionData = (await fetchTaxlawAction(args.id, referer))?.data?.ASIQTB002PR01;
+    const dcm = actionData?.dcmDVO;
+
+    // 국세청은 존재하지 않는 id에도 status=SUCCESS + dcmDVO=null 을 준다.
+    // 이걸 "본문 없음"으로 흘리면 LLM이 '예규 부존재'로 오독한다 — 반드시 구분한다.
+    if (!dcm) {
+      const text =
+        `[LOOKUP_FAILED] ntstDcmId ${args.id} 로 문서를 찾지 못했습니다(국세청 응답이 비어 있음).\n\n` +
+        `id가 틀렸거나 국세청 조회 방식이 바뀐 경우입니다.\n` +
+        `⚠️ 이것은 해당 예규의 **부존재를 의미하지 않습니다**. 본문을 추측하지 말고 search_decisions(domain="nts")로 다시 확인하세요.\n` +
+        `원문 링크: ${referer}`;
+      return { content: [{ type: "text", text }], isError: true };
+    }
+
+    const reply = normalizeTaxlawBodyCandidate(dcm.ntstDcmCntn);   // 국세청 회신
+    const question = extractTaxlawEditorBody(actionData);          // 납세자 질의서
+
+    let output = `=== ${dcm.ntstDcmTtl || "국세청 법령해석"} ===\n\n`;
+    output += `기본 정보:\n`;
+    output += `  문서번호: ${dcm.ntstDcmDscmCntn || "N/A"}\n`;
+    output += `  귀속연도: ${dcm.attrYr || "N/A"}\n`;
+    output += `  ntstDcmId: ${args.id}\n\n`;
+
+    if (dcm.ntstDcmGistCntn) {
+      output += `요지:\n${dcm.ntstDcmGistCntn}\n\n`;
+    }
+
+    if (reply) {
+      output += `회신:\n${reply}\n\n`;
+    }
+
+    if (question) {
+      output += `본문:\n`;
+      output += `※ 아래는 납세자가 제출한 질의내용 요약·관련법령이며, **국세청 회신이 아닙니다**. 근거로 인용하지 마세요.\n`;
+      output += `${question}\n\n`;
+    }
+
+    if (!reply && !question) {
+      output += `⚠️ 회신 본문이 비어 있습니다(회신생략 문서일 수 있음). 해당 예규가 존재하지 않는다는 뜻은 아닙니다 — 요지·링크로 판단하세요.\n\n`;
+    }
+
+    output += `원문 링크: ${referer}\n`;
+
+    return {
+      content: [{
+        type: "text",
+        text: truncateResponse(output)
+      }]
+    };
+  } catch (error) {
+    return formatToolError(error, "get_nts_interpretation_text");
+  }
 }
 
 async function getCgmExpcTextByTarget(
