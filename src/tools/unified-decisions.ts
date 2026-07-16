@@ -135,7 +135,7 @@ export const SearchDecisionsSchema = z.object({
   display: z.number().min(1).max(100).default(20).optional().describe("결과 수 (기본20)"),
   page: z.number().min(1).default(1).optional().describe("페이지 (기본1)"),
   sort: z.string().optional().describe("정렬: lasc/ldes/dasc/ddes/nasc/ndes"),
-  options: z.record(z.unknown()).optional().describe(
+  options: z.record(z.string(), z.unknown()).optional().describe(
     "도메인별 옵션. prec:{court,caseNumber,fromDate,toDate} tax_tribunal:{cls,gana,dpaYd,rslYd} customs:{inq,rpl,gana,explYd} constitutional:{caseNumber} interpretation:{fromDate,toDate} treaty:{cls,natCd,eftYd,concYd}"
   ),
   apiKey: z.string().optional(),
@@ -231,7 +231,7 @@ export const GetDecisionTextSchema = z.object({
   domain: z.enum(DOMAINS).describe("도메인 선택 (enum 값 참조)"),
   id: z.string().describe("일련번호/ID (search 결과에서 획득)"),
   full: z.boolean().optional().describe("true=본문 전문 그대로. 미지정=이유/전문 섹션 계단식 축약 (판시·요지·주문은 항상 full)"),
-  options: z.record(z.unknown()).optional().describe(
+  options: z.record(z.string(), z.unknown()).optional().describe(
     "도메인별 옵션. treaty:{chrClsCd:'010202'(한)/'010203'(영)} english_law:{mst,lawName} prec/constitutional/admin_appeal/interpretation:{caseName}"
   ),
   apiKey: z.string().optional(),
