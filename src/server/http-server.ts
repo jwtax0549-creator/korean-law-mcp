@@ -165,7 +165,7 @@ export async function startHTTPServer(createServer: () => Server, port: number) 
       server = createServer()
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined,  // ← stateless 모드
-        enableJsonResponse: false,  // SSE(text/event-stream) 응답 — claude.ai Streamable HTTP 커넥터 호환. JSON 응답이면 핸드셰이크는 되나 도구 호출이 안 붙음(2026-07-16 실측: axis-research=SSE 정상 vs korean-law=JSON 미부착)
+        enableJsonResponse: true,
       })
 
       // 요청 종료 시 리소스 정리
