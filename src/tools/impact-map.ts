@@ -150,7 +150,7 @@ export async function impactMap(
 ): Promise<{ content: Array<{ type: string; text: string }>; isError?: boolean }> {
   try {
     // 1. 법령 식별
-    const laws = await findLaws(apiClient, input.lawName, input.apiKey, 1)
+    const laws = await findLaws(apiClient, input.lawName, input.apiKey, 1, 100)
     if (laws.length === 0) {
       return {
         content: [{

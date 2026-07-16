@@ -140,7 +140,7 @@ export async function applicableLaw(
     }
 
     // 1. 법령 식별
-    const laws = await findLaws(apiClient, input.lawName, input.apiKey, 1)
+    const laws = await findLaws(apiClient, input.lawName, input.apiKey, 1, 100)
     if (laws.length === 0) {
       return notFoundResponse(`'${input.lawName}' 법령을 찾을 수 없습니다.`, [
         "search_law로 정확한 법령명을 먼저 확인하세요.",
