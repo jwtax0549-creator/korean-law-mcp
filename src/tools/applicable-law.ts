@@ -76,7 +76,7 @@ function extractJoText(jsonText: string): string {
 }
 
 /** 부칙내용(중첩 배열/문자열)을 라인 배열로 평탄화 */
-function flattenAddendum(content: unknown): string[] {
+export function flattenAddendum(content: unknown): string[] {
   if (content === null || content === undefined) return []
   if (typeof content === "string") {
     return content.split(/\n/).map(s => cleanHtml(s).trim()).filter(Boolean)
@@ -250,11 +250,11 @@ export async function applicableLaw(
             ex.lines.forEach(l => lines.push(`    ${l}`))
           }
         } else {
-          lines.push(`▶ 적용례·경과조치: 이후 개정 부칙에서 경과규정 신호 미발견 (부칙 원문 확인: get_law_text)`)
+          lines.push(`▶ 적용례·경과조치: 이후 개정 부칙에서 경과규정 신호 미발견 (부칙 원문: get_law_text(mst="${current.mst}", addenda="list"))`)
         }
       } catch {
         lines.push("")
-        lines.push(`▶ 적용례·경과조치: [FAILED] 부칙 조회 실패 — get_law_text(mst="${current.mst}")로 부칙을 직접 확인하세요.`)
+        lines.push(`▶ 적용례·경과조치: [FAILED] 부칙 조회 실패 — get_law_text(mst="${current.mst}", addenda="list")로 부칙 목록을 확인하세요.`)
       }
     }
 

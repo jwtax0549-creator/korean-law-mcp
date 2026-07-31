@@ -8,6 +8,7 @@ import { buildJO } from "../lib/law-parser.js"
 import { lawCache } from "../lib/cache.js"
 import { formatArticleUnit } from "../lib/article-parser.js"
 import { getStrategyWarning } from "../lib/article-warnings.js"
+import { flattenAddendum } from "./applicable-law.js"
 import { formatToolError } from "../lib/errors.js"
 
 import { MAX_RESPONSE_SIZE, truncateResponse } from "../lib/schemas.js"
@@ -17,6 +18,7 @@ export const GetLawTextSchema = z.object({
   lawId: z.string().optional().describe("법령ID (search_law에서 획득)"),
   jo: z.string().optional().describe("조문 번호 (예: '제38조' 또는 '003800')"),
   efYd: z.string().optional().describe("시행일자 (YYYYMMDD 형식)"),
+  addenda: z.string().optional().describe("부칙 조회. 'list'=부칙 목록(공포일자·번호) | 'YYYYMMDD'=해당 공포일자 부칙 본문. 경과조치·적용례 확인용. 지정하면 jo는 무시된다(법제처는 부칙을 전문 조회에만 실어 준다)"),
   apiKey: z.string().optional().describe("법제처 Open API 인증키(OC). 사용자가 제공한 경우 전달")
 }).refine(data => data.mst || data.lawId, {
   message: "mst 또는 lawId 중 하나는 필수입니다"
@@ -30,7 +32,8 @@ export async function getLawText(
 ): Promise<{ content: Array<{ type: string, text: string }>, isError?: boolean }> {
   try {
     // 조문 번호가 한글이면 JO 코드로 변환
-    let joCode = input.jo
+    // 부칙은 전문 조회 응답에만 실려 온다(JO 지정 시 최상위 키에 부칙이 없다)
+    let joCode = input.addenda ? undefined : input.jo
     if (joCode && /제\d+조/.test(joCode)) {
       try {
         joCode = buildJO(joCode)
@@ -46,7 +49,7 @@ export async function getLawText(
     }
 
     // Check cache first (efYd 정규화: 미지정 → 'current'로 통일)
-    const cacheKey = `lawtext:${input.mst || input.lawId}:${joCode || 'full'}:${input.efYd || 'current'}`
+    const cacheKey = `lawtext:${input.mst || input.lawId}:${joCode || 'full'}:${input.efYd || 'current'}:${input.addenda || ''}`
     const cached = lawCache.get<string>(cacheKey)
     if (cached) {
       return {
@@ -180,6 +183,43 @@ export async function getLawText(
       }
     }
 
+    // 부칙 조회 — lawData.부칙 은 지금까지 아무도 읽지 않았다(경과조치 확인 경로가 막혀 있었다)
+    if (input.addenda) {
+      const buRaw = lawData.부칙?.부칙단위
+      const buList: any[] = buRaw ? (Array.isArray(buRaw) ? buRaw : [buRaw]) : []
+      const label = (b: any) => `${b.부칙공포일자 || "?"} 제${b.부칙공포번호 || "?"}호`
+      const idArg = input.mst ? `mst="${input.mst}"` : `lawId="${input.lawId}"`
+
+      if (buList.length === 0) {
+        return { content: [{ type: "text", text: resultText + "부칙: 응답에 부칙이 없습니다." }] }
+      }
+
+      if (input.addenda === "list") {
+        let t = resultText + `부칙 ${buList.length}건 (최신순)\n\n`
+        t += buList.slice().reverse().map(label).join("\n")
+        t += `\n\n특정 부칙 본문: get_law_text(${idArg}, addenda="YYYYMMDD")`
+        const out = truncateResponse(t)
+        lawCache.set(cacheKey, out)
+        return { content: [{ type: "text", text: out }] }
+      }
+
+      const want = String(input.addenda).replace(/[^0-9]/g, "")
+      const hits = buList.filter((b: any) => String(b.부칙공포일자 || "") === want)
+      if (hits.length === 0) {
+        const recent = buList.slice(-5).reverse().map(label).join(" · ")
+        return { content: [{ type: "text", text: resultText + `공포일자 ${want} 부칙 없음.\n최근 5건: ${recent}\n전체 목록: get_law_text(${idArg}, addenda="list")` }] }
+      }
+
+      let t = resultText + `부칙 ${hits.length}건 (공포일자 ${want})`+ `\n\n`
+      for (const b of hits) {
+        const body = flattenAddendum(b.부칙내용).join("\n")
+        t += `[부칙] ${label(b)}\n${body}\n\n`
+      }
+      const out = truncateResponse(t)
+      lawCache.set(cacheKey, out)
+      return { content: [{ type: "text", text: out }] }
+    }
+
     // 조문 미지정 시 전체 법령 대신 목차(조문 제목 목록)만 반환
     // 대형 법령(국가공무원법 등)의 "too large content" 에러 방지
     if (!input.jo && articleUnits.length > 20) {
@@ -205,6 +245,12 @@ export async function getLawText(
         tocText += `lawId="${input.lawId}", jo="제XX조")`
       }
       tocText += `\n여러 조문 일괄 조회: get_batch_articles 도구 사용`
+      const buRawToc = lawData.부칙?.부칙단위
+      const buCount = buRawToc ? (Array.isArray(buRawToc) ? buRawToc.length : 1) : 0
+      if (buCount > 0) {
+        const idArgToc = input.mst ? `mst="${input.mst}"` : `lawId="${input.lawId}"`
+        tocText += `\n부칙 ${buCount}건 — 목록: get_law_text(${idArgToc}, addenda="list") · 경과조치·적용례 확인 시 필수`
+      }
 
       // 절단본을 캐시 — 캐시 히트 경로는 절단 없이 반환하므로 미절단 캐시 시 50KB 제한 우회됨
       const truncatedToc = truncateResponse(tocText)

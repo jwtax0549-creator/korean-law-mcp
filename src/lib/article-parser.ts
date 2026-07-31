@@ -64,12 +64,18 @@ export function extractHangContent(hangInput: any[] | any): string {
 
     // 법제처 JSON은 목을 호 아래가 아니라 항의 형제로 준다 (호 객체 키는 호번호·호내용뿐)
     const hangMokArray = hang.목 ? (Array.isArray(hang.목) ? hang.목 : [hang.목]) : []
+    let mokEmitted = 0
     for (const mok of hangMokArray) {
       if (!mok || typeof mok !== "object") continue
 
       if (mok.목내용) {
         const mokContent = flattenContent(mok.목내용)
         if (mokContent) {
+          // 목은 호와 무관하게 항 밑에 평평하게 온다. 그대로 이어 붙이면 첫 묶음은 앞의
+          // 마지막 호 소속으로 읽히고, 목번호가 「가」로 되돌아가는 자리가 다음 호의 묶음이다.
+          // 소속 호는 표시할 수 없으므로 빈 줄로 묶음만 갈라 오귀속을 줄인다.
+          if (mokEmitted === 0 || String(mok.목번호 || "").startsWith("가")) content += "\n"
+          mokEmitted++
           content += "\n" + mokContent
         }
       }
