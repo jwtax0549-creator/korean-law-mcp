@@ -106,8 +106,11 @@ export async function getAnnexes(
       }
     }
 
-    // 4차: "규정" 타입은 licbyl과 admbyl 양쪽에 존재 가능 → admin fallback
-    if (annexList.length === 0 && /규정/.test(normalizedLawName)) {
+    // 4차: 행정규칙(고시/훈령/예규) 별표 admin fallback.
+    // "사료 등의 기준 및 규격"처럼 제목에 '고시·훈령' 등 종류 키워드가 없는 행정규칙은
+    // detectLawType이 'law'로 분류해 licbyl만 조회하고 admbyl 경로를 놓친다(#58).
+    // 앞 단계가 모두 비면 종류 무관하게 admbyl로 재조회한다.
+    if (annexList.length === 0) {
       try {
         const adminText = await apiClient.fetchApi({
           endpoint: "lawSearch.do",
@@ -377,7 +380,13 @@ function findMatchingAnnex(
     return selectorNumbers.some((num) => titleMatchesAnnexNumber(annexTitle, num))
   })
 
-  if (matches.length === 0) return undefined
+  if (matches.length === 0) {
+    // 번호가 안 맞아도 별표가 유일 1건이면 그 별표를 정답으로 폴백.
+    // 여권법 시행령 '수수료 및 사무의 대행에 드는 비용(제39조 관련)'처럼 번호 없는 단일 별표는
+    // 모델이 "별표1" 등 임의 번호로 불러도 매칭 0건 → NOT_FOUND로 새는 대신 유일 별표를 반환.
+    if (annexList.length === 1) return annexList[0]
+    return undefined
+  }
   if (matches.length === 1) return matches[0]
 
   // 별표번호 충돌 → 별표종류("별표"/"서식")로 구분

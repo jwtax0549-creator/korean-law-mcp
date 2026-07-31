@@ -4,6 +4,8 @@
  * - AbortController for timeout
  */
 
+import { followLawAntibot } from "./law-antibot.js"
+
 /**
  * URL에서 민감 정보(API 키) 마스킹 — 에러 메시지/로그 노출 방지.
  * 법제처 API는 ?OC=KEY 쿼리 파라미터로 키를 받으므로 해당 값만 *** 처리.
@@ -11,7 +13,7 @@
  */
 export function maskSensitiveUrl(url: string): string {
   if (!url) return url
-  return url.replace(/([?&](?:oc|OC|apikey|apiKey|api_key|authKey|auth_key|key)=)[^&]+/g, "$1***")
+  return url.replace(/([?&](?:oc|apikey|api_key|authkey|auth_key|key)=)[^&]+/gi, "$1***")
 }
 
 export interface FetchWithRetryOptions extends RequestInit {
@@ -23,6 +25,13 @@ export interface FetchWithRetryOptions extends RequestInit {
   retryDelay?: number
   /** HTTP status codes to retry on (default: [429, 503, 504]) */
   retryOn?: number[]
+  /**
+   * 정상 응답이 HTML인 요청(예: DRF type=HTML — lsHistory 연혁 목록)에 true.
+   * 기본(false)은 "200인데 HTML = 점검 페이지"로 보고 재시도하는데, HTML이
+   * 정상인 엔드포인트에선 매 호출이 재시도 소진 + 지연(요청 4배 증폭)이 된다.
+   * true여도 빈 본문은 여전히 일시 장애로 재시도한다.
+   */
+  allowHtmlBody?: boolean
 }
 
 const DEFAULT_TIMEOUT = 30000
@@ -74,6 +83,7 @@ export async function fetchWithRetry(
     retries = DEFAULT_RETRIES,
     retryDelay = DEFAULT_RETRY_DELAY,
     retryOn = DEFAULT_RETRY_ON,
+    allowHtmlBody = false,
     ...fetchOptions
   } = options
 
@@ -88,7 +98,7 @@ export async function fetchWithRetry(
     if (!headers.has("referer") && isLawGoKrHost(url)) headers.set("referer", DEFAULT_REFERER)
 
     try {
-      const response = await fetch(url, {
+      let response = await fetch(url, {
         ...fetchOptions,
         headers,
         signal: controller.signal,
@@ -98,6 +108,14 @@ export async function fetchWithRetry(
 
       // Success or non-retryable error
       if (response.ok || !retryOn.includes(response.status)) {
+        // law.go.kr JS 안티봇 페이지(클라우드 IP에서 location.assign 리다이렉트) 우회.
+        // 로컬/등록 IP에서는 no-op. Fly 등 클라우드 배포에서 UA/Referer로 안 뚫릴 때의 방어층.
+        if (response.ok && isLawGoKrHost(url)) {
+          try {
+            const bypassed = await followLawAntibot(response, url, headers, timeout)
+            if (bypassed) response = bypassed
+          } catch { /* 우회 실패 시 원본 응답으로 진행 */ }
+        }
         // 200인데 빈 본문/HTML(법제처 점검·과부하 페이지)이면 일시 장애로 보고 재시도.
         // 이를 막지 않으면 XML 파서가 "missing root element"로 터진다.
         if (response.ok && attempt < retries) {
@@ -105,7 +123,7 @@ export async function fetchWithRetry(
           try { bodyText = await response.clone().text() } catch { /* clone 실패 시 정상 처리 */ }
           if (bodyText !== null) {
             const bad = detectBadBody(bodyText)
-            if (bad) {
+            if (bad === "empty" || (bad === "html" && !allowHtmlBody)) {
               lastError = new Error(
                 `법제처 API 비정상 응답(${bad === "empty" ? "빈 본문" : "HTML 페이지"}) - ${maskSensitiveUrl(url)}`
               )

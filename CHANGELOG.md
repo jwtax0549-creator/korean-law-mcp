@@ -1,5 +1,209 @@
 # Changelog
 
+## [4.9.1] - 2026-07-27
+
+행정규칙 전문이 **자연어·체인 경로에서만** 조회되지 않던 문제 수정. `get_admin_rule` 직접 호출은 멀쩡했고 체인이 넘기는 식별자만 틀렸는데, 안내문이 이를 「법제처 API 제한」으로 단정해 원인 추적까지 막고 있었다(보고자는 한동안 법제처 제약으로 판단하고 우회 설계를 검토). 같은 파일에서 `compare_admin_rule_old_new` 가 응답 실형상과 어긋나 매 호출 빈 결과이던 것도 함께 수리. 로컬 회귀 129건 통과 + 실 API 대조.
+
+### Fixed
+
+- **행정규칙 전문 조회가 체인 경로에서 항상 NOT_FOUND (#72, @gonnarun)**: `lawService.do?target=admrul&ID=` 가 받는 값은 **행정규칙일련번호**(13자리)인데 체인이 검색 결과에서 **행정규칙ID**(4~5자리)를 뽑아 넘기고 있었다. `search_admin_rule` 출력이 두 값을 나란히 내보내는 데다 `get_admin_rule` 스키마 설명도 `행정규칙ID` 라고 적혀 있어, 체인뿐 아니라 LLM 직접 호출도 같은 값을 고르게 유도했다. `docs/API.md` 는 이미 13자리로 명시돼 있었고 코드만 어긋나 있던 케이스. 체인 정규식을 `행정규칙일련번호` 로 바꾸고, 스키마 설명·검색 출력 라벨에 어느 값이 `id` 인지 못 박음 (`src/lib/tool-chain-config.ts`, `src/tools/admin-rule.ts`)
+
+  ```
+  ID=2100000271110 (행정규칙일련번호) → 209,749 B · 조문내용 114블록
+  ID=36934         (행정규칙ID)       → 138 B · "일치하는 행정규칙이 없습니다"
+  ```
+
+- **`compare_admin_rule_old_new` 가 매 호출 빈 결과**: 검색은 항목 태그를 `admrul` 로 찾는데 신구법 응답의 실제 항목은 `<oldAndNew>`(필드도 `신구법명`·`신구법일련번호`)라 **항상 0건**, 본문은 `<구조문>`/`<신조문>` 을 찾는데 실제 구조는 `<구조문목록>`/`<신조문목록>` 안의 `<조문 no="N">` 이라 **항상 `[NOT_FOUND] 신구법 대조 데이터가 없습니다`** 였다. 본문 조회 `id` 역시 신구법일련번호(13자리)다. 구·신 시행일 병기, 개정 부분 `<P>` 표시를 `【 】` 로 보존(`<신  설>`·`<단서 신설>` 같은 꺾쇠 **본문 표기**는 태그로 오인해 지우지 않는다) (`src/tools/admin-rule.ts`)
+
+### Changed
+
+- **전문이 비어 있을 때 원인별 안내로 분리 (#72)**: 종전에는 원인과 무관하게 「법제처 API 제한: 일부 행정규칙은 전문 조회가 지원되지 않습니다」로 단정했다. 이제 ① 기본정보조차 없으면 **식별자 오류**(일련번호 13자리를 넘기라고 명시) ② `조문형식여부=N` 이면 **첨부파일 전용** ③ 그 외에만 전문 미제공으로 안내한다. 「전문 조회 미지원」은 ②에만 해당하는 진단이었다 (`src/tools/admin-rule.ts`)
+
+## [4.9.0] - 2026-07-26
+
+`verify_citations` 가 **조용히 검증을 건너뛰던** 표기 3종을 해소. 셋 다 "검증 실패"가 아니라 **검증 미가동**이라, 같은 텍스트에 없는 조문이 섞여 있어도 `✗` 가 나오지 않아 환각 게이트로 쓸 때 "통과"로 오독되던 문제다. 로컬 회귀 122건 통과 + 실 API 대조.
+
+### Fixed
+
+- **`「법령명」 제N조` 에서 법령명 추출 실패 (#69, @BW-YU)**: `LAW_NAME_REGEX` 는 `$` 앵커로 법령명 종단을 찾는데 표준 인용 표기의 **닫는 낫표가 lookback 끝에 남아** 앵커가 걸리지 않았다(기존 코드는 후행 공백만 제거). 닫는 인용기호(`」』】〕>`)를 함께 벗기고 로직을 `extractLawName` 으로 분리. 낫표 없는 평문 경로(#55 수식어 순차 축약)는 동작 불변 (`src/tools/verify-citations.ts`)
+- **가운뎃점 표기 차이로 공식 법령명과 불일치 (#69, @BW-YU)**: 법제처 공식 법령명은 **한글 가운뎃점 `ㆍ`(U+318D)** 를 쓰는데(`식품 등의 표시ㆍ광고에 관한 법률`) 실무 문서·판결문·LLM 출력은 라틴 중점 `·`(U+00B7)가 보통이라, `looseMatchLawName` 정규화가 공백만 제거해 표기만 다른 같은 법이 불일치로 떨어졌다. `·ㆍ‧•・` 5종을 정규화에 편입 — 무관 법령 차단(`민법`→`난민법`)은 유지 (`src/lib/law-search.ts`)
+- **`같은 법 시행규칙 제N조` 가 무관 법령에 매칭 (#70, @gonnarun)**: `「A법」 제N조 및 같은 법 시행규칙 제M조` 는 법제처 조문·행정규칙·관공서 서식의 표준 표기인데 `같은 법` 조응이 해소되지 않아 두 지점에서 어긋났다. ① 후보 축약의 마지막 단계가 **접미사 단독 후보**(`시행규칙`·`법 시행규칙`)를 만들어 어떤 문서에서든 무관 법령을 물어왔고(관측: `119긴급신고의 관리 및 운영에 관한 법률 시행규칙`), ② 30자 lookback 안에 선행 법령명이 있어도 승계되지 않았다. `lawNameCandidates` 가 접미사뿐인 후보를 버리도록 하고(후보 0개면 검색을 시도하지 않고 `⚠ 법령명 불명확` — 검색 0건을 `✗ NOT_FOUND` 로 낙인하지 않는다), `parseCitations` 가 직전 법령명을 들고 가며 `같은 법`·`동법` 을 승계하도록 했다. 선행 법령명이 없거나 **빈 줄로 문단이 바뀌면 승계하지 않는다**(무관 법령을 근거로 판정하는 게 더 나쁜 오답). 조응 판별은 추출된 법령명이 아니라 lookback 꼬리를 보므로 앞 인용의 잔재(`조 같은 법 시행령`)에 흔들리지 않고, `노동법` 의 `동법` 을 조응으로 오인하지 않는다 (`src/tools/verify-citations.ts`)
+
+실 API 대조 (`「노인장기요양보험법」 제38조제1항 및 같은 법 시행규칙 제30조`):
+
+```
+before: ⚠ 0 실존 / 2 확인필요 — '119긴급신고의 관리 및 운영에 관한 법률 시행규칙'으로만 매칭
+after : ✓ 2 실존 — 노인장기요양보험법 제38조 제1항 / 노인장기요양보험법 시행규칙 제30조
+        같은 텍스트의 제999조는 ✗ NOT_FOUND (존재 범위: 제1조~제44조) 로 탐지 — 환각 게이트 가동
+```
+
+### 남은 것 (#70 보고자 지적, 별건)
+
+- 고시·행정규칙 인용(`식품등의 표시기준 제2조`)은 `LAW_NAME_REGEX` 접미사 목록 밖이라 여전히 미추출. `admrul` 조회 경로가 필요하고, 잘못 붙이면 실존 고시가 `✗` 로 낙인될 위험이 있어 분리.
+
+## [4.8.0] - 2026-07-22
+
+외부 기여 PR 5건 반영 — 행위시법 판단·연혁 파싱·검색 리졸버·재시도·폐지 법령 처리 정확도 개선. 로컬 회귀 106건 통과.
+
+### Fixed
+
+- **DRF 간헐 404 재시도 + `type=HTML` 정상응답 재시도 증폭 제거 (#63, @zzocrypto)**: 유효한 `mst`+`jo` 조회가 간헐적으로 404를 반환하고 동일 파라미터 재시도 시 성공하는데, `fetchWithRetry` 기본 재시도 대상(`[429,503,504]`)에 404가 빠져 1차 실패가 "조문 부재"로 오답되던 것 — DRF 호출 전체에 `[404,429,503,504]` 적용(소진 후에만 실패). 또 `lsHistory` 등 `type=HTML` 정상응답이 HTML-본문 감지 재시도에 걸려 대형 연혁(소득세법류)에서 ~40s까지 늘어지던 것을 `allowHtmlBody`로 제외(HTML 에러페이지 감지는 유지) — ~40s→~4s (`src/lib/fetch-with-retry.ts`, `src/lib/api-client.ts`)
+- **분리시행 법령의 적용 버전 오특정 등 행위시법 6건 (#64, @zzocrypto)**: 조항별 시행일이 나뉘는 법령(중대재해처벌법 50인 미만 3년 유예 등)에서 `applicable_law`가 잘못된 버전을 "기준일 시행 중"으로 특정하던 것을 eflaw 범위검색 시행 슬라이스 보정(`fetchEffectiveSlices`)으로 수정. 동일 시행일 tie-break(공포일·공포번호 내림차순), 적용 버전 자신의 부칙 발췌, 무패딩 날짜("2010.1.1") 파싱, '폐지제정' 오분류, jo 지정 시 조문번호 검증 포함. eflaw 실패 시 기존 lsHistory 결과 유지(보수적 폴백) (`src/tools/applicable-law.ts`, `src/lib/historical-utils.ts`)
+- **연혁 페이징 조기종료·NaN 정렬·조문 출력 훼손·제21항+ 미지원 (#65, @zzocrypto)**: 연혁 수집 종료를 필터 후 행수 대신 **원시 총계(totalCount) 기준**으로 변경(500행 초과 법령의 옛 본법 버전 누락 방지), `time_travel` 버전선택 정렬의 빈 시행일 NaN 폴백, `get_historical_law`의 `[object Object]`·`N/A` 출력을 `safeText` 평탄화로, 원숫자 매핑을 ①~⑳에서 ㉑~㊿까지 확장(제21항+ 인용을 "존재않는 항"으로 오판하던 것 수정) (`src/lib/historical-utils.ts`, `src/lib/article-parser.ts`, `src/tools/historical-law.ts`, `src/tools/scenarios/time-travel.ts`)
+  - 병합 시 보강: `parseTotalCount`가 콤마 표기(`<strong>1,696</strong>`)도 파싱하도록 방어 — #65가 totalCount를 페이징 종료 1차 기준으로 승격했는데 `\d+`로만 잡으면 "1,696"이 "1"로 끊겨 대형 법령이 오히려 1페이지에서 조기 종료되는 역행을 막음
+- **`findLaws` 기본 조회 20이 관련도 정렬을 굶겨 무관 법령을 반환 (#66, @zzocrypto)**: `applicable_law(lawName="상법")` 같은 호출이 전혀 무관한 법령 분석을 확신형으로 출력하던 것 — 법제처 LIKE+가나다순 검색에서 정확매칭이 앞 20건에 없어 무관 부분매칭 1위를 `laws[0]`로 신뢰하던 문제. 기본 `searchDisplay` 20→100(비용 동일 1콜), `looseMatchLawName` lib 승격, 별칭 canonical 해소 대조(`resolvedLawMatches`), `applicable_law`·`impact_map`에 무관 1위 차단 가드(NOT_FOUND + 정식명 재확인 안내) (`src/lib/law-search.ts`, `src/tools/applicable-law.ts`, `src/tools/impact-map.ts`)
+
+### Changed
+
+- **폐지 법령 인용을 '환각'으로 오탐하지 않도록 REPEALED 분리 보고 (#67, @yabooung)**: `verify_citations`가 현행 검색만 써서 폐지 법령 인용(예 「국유재산관리특별회계법 제6조」, 2007 폐지)을 검색 0건→`[HALLUCINATION_DETECTED]`(isError:true)로 낙인하던 것 — 현행 0건일 때만 `target=eflaw` 1회 폴백해 `현행연혁코드="연혁"`이면 `⌛ [REPEALED_REFERENCE]`로 분리 보고(폐지 건은 `failCount` 미포함 → `isError` 불변). 정상(`✓`)·진짜 환각(`✗`) 판정은 불변, 정상 인용 추가 비용 0 (`src/tools/verify-citations.ts`, `src/lib/law-search.ts`)
+
+## [4.7.5] - 2026-07-21
+
+### Fixed
+
+- **`get_law_abbreviations` 완전 복구 (#61)**: 항목 태그를 존재하지 않는 `<lsAbrv>`로 찾아 **매 호출 "약칭 데이터가 없습니다"로 실패**하던 것 수정. 실제 `lawSearch.do?target=lsAbrv` 응답의 항목 태그는 `<law>`, 필드는 `법령명한글`/`법령약칭명`이다. `display=100` 전달 + 총계를 응답 `totalCnt`로 정직 표기(조회분을 총계로 위장하지 않음) (`src/tools/utils.ts`)
+- **연계 3종 루트 태그 + `get_law_tree` 파서 복구 (#62)**: `lnkLsOrdJo`/`lnkDep`/`lnkOrd`의 실제 응답 루트가 `lnkOrdJoSearch`/`lnkDepSearch`/`OrdinSearch`인데 대문자 루트(`LnkLsOrdJoSearch` 등)를 가정해 **항상 0건(NOT_FOUND)**. 루트 매칭을 대소문자 무시로 변경. `lnkDep`은 법제처가 서버 검색 필터를 지원하지 않아(전체 덤프) 조회 페이지 내 클라이언트 필터 + "전수 아님" 한계 명시로 전환하고 `get_linked_ordinances` 사용을 안내. `get_law_tree`는 `get_three_tier` 실제 출력(`법령명:` 헤더 + `[시행령]`/`[시행규칙]` 인라인 마커) 기준으로 파서 재작성, 빈 입력은 스키마에서 거부, 데이터 없으면 빈 트리 대신 NOT_FOUND (`src/tools/law-linkage.ts`, `src/tools/law-tree.ts`)
+
+## [4.7.4] - 2026-07-15
+
+### Fixed
+
+- **`search_law` 오법령 확장검색 차단 + 인공지능기본법 약칭 등록**: 「인공지능 발전과 신뢰 기반 조성 등에 관한 기본법」의 통칭 "인공지능법"이 정식 제명의 부분문자열이 아니라 LIKE 검색이 0건이 되고, 키워드 확장이 만든 "AI법" 쿼리에 법제처가 **검색어를 무시한 가나다순 무관 법령 50건**을 반환 → LexDiff fast-path가 첫 항목(가맹사업법)을 집어가던 사고의 근원. 약칭(인공지능법/인공지능기본법/AI법/ai기본법) 등록 (`src/lib/search-normalizer.ts`)
+- **`hasRelatedHit` 가드**: 확장쿼리 결과에 법령명·약칭이 쿼리와 포함관계인 항목이 하나도 없으면(= API가 쿼리를 무시한 응답) 채택하지 않고 다음 확장쿼리·폴백으로 진행 (`src/tools/search.ts`). 약칭 해석 4종 + `hasRelatedHit` 4종 테스트 추가
+
+> 이 변경의 커밋 메시지에는 `v4.6.7`로 적혀 있으나 4.6.7은 발행된 적이 없으며, 실제로는 4.7.4로 배포되었습니다.
+
+## [4.7.3] - 2026-07-14
+
+### Fixed
+
+- **행정규칙(고시) 별표 조회 복구 (#58)**: `get_annexes`가 「사료 등의 기준 및 규격」처럼 제목에 '고시·훈령·예규' 등 종류 키워드가 없는 행정규칙 별표를 `NOT_FOUND`로 반환하던 문제 수정. `detectLawType`이 이런 이름을 `law`로 분류해 `licbyl`(0건)만 조회하고 `admbyl` 경로를 놓치던 것이 원인. admin(admbyl) fallback을 기존 `/규정/` 이름 제한에서 **모든 미매칭 케이스**로 일반화해, `search_admin_rule`로 검색되는 행정규칙이면 별표(예: 별표16 「사료 내 유해물질의 범위 및 허용기준」)도 정상 추출된다 (`src/tools/annex.ts`)
+
+## [4.7.2] - 2026-07-11
+
+### Fixed
+
+- **`verify_citations` 수식어 앞 법령명 재시도 (#55)**: 법령명 앞에 수식어가 붙은 완전문장("절도죄는 형법 제329조…")에서 조문검증이 `⚠ PARTIAL_VERIFIED`로 저하되어 **환각(없는 조문·제목 불일치)이 탐지되지 않던** 문제 수정. `looseMatch` 실패 시 앞 어절을 순차 축약하며 `findLaws`를 재시도하되, 다어절 법령명(「전자상거래 등에서의 소비자보호에 관한 법률」)은 전체 후보를 먼저 두어 보존 (`src/tools/verify-citations.ts`)
+
+### Security
+
+- **hono 4.12.22 → 4.12.29**: `npm audit` HIGH 5건 해소. `@modelcontextprotocol/sdk`의 전이 의존성이라 `overrides`로 고정 (#54)
+
+## [4.7.1] - 2026-07-08
+
+### Fixed
+
+PlayMCP 심사 피드백 대응.
+
+- **`legal_research` task 오인 흡수**: LLM이 `scenario` 값(`penalty` 등)을 `task`에 잘못 넣어도 `scenario`로 재배치하고 호환 task로 승격해 툴콜 실패를 제거(의도 보존). 미지의 task 값은 `full_research`로 폴백. 실행 경로·API 호출은 불변 (`src/tools/legal-research.ts`)
+- **`ordinance_radar` query 별칭**: `query` 파라미터 별칭을 추가해 `search_law` 등 다른 도구와 규약을 통일 — 자연어 조례명으로 호출 시 실패하던 문제 해소 (`src/tools/ordinance-radar.ts`)
+
+## [4.7.0] - 2026-07-07
+
+### Added
+
+- **`ordinance_radar` — 조례 정비 레이더**: 조례 제1조(목적)의 「」 인용에서 근거 상위법령(법률·시행령·시행규칙, "같은 법" 축약 포함)을 추출한 뒤 각 상위법의 현행 시행일과 조례 시행일을 대조해 **정비 검토 대상을 자동 플래그**. 법제처 자치법규 연계 API(lnkOrd)는 커버리지 부족(주차장 조례 0건)으로 미사용하고 본문 표준 표기 파싱으로 대체. 목적 조문만 스코핑해 별표의 무관 인용(공직선거법 등) 과잉경보를 배제(32 → 3건). `V3_EXPOSED` 10번째 직노출 도구 (`src/tools/ordinance-radar.ts`)
+
+### Security
+
+- **JSON-RPC 배치 증폭 차단**: 배치의 `tools/call`을 개수만큼 rate limit·폴백 쿼터에 계수 — 단일 POST에 수백 개를 담아 서버 `LAW_OC` 쿼터를 소진시키는 증폭 벡터를 차단. 요청당 `tools/call` 상한 20 (`MCP_MAX_BATCH_CALLS`) (`src/server/http-server.ts`)
+
+### Fixed
+
+- **graceful shutdown**: idle keep-alive 연결을 끊지 않아 매 배포마다 10초 대기 후 `exit(1)`로 기록되던 문제 → `closeIdleConnections()` + `exit(0)` (`src/server/http-server.ts`)
+- **`get_article_history` lawName 정확매칭 우선**: 검색 첫 결과를 무조건 채택해 '상법' 입력 시 가나다순 앞선 타법을 오조회하던 문제 수정
+- **`get_ordinance` id 별칭**: id 별칭으로 호출할 때 다음 단계 힌트가 `ordinSeq="undefined"`로 출력되던 버그 수정
+- **`maskSensitiveUrl` 대소문자 무시(`gi`)**: API 키 마스킹 회귀 방지 (`src/lib/fetch-with-retry.ts`)
+
+## [4.6.6] - 2026-07-06
+
+### Fixed
+
+- **"간헐적으로 도구를 못 찾음" 근본 해결**: 일반 rate limiter가 핸드셰이크(`initialize`/`tools/list`)까지 429로 막던 문제 → `tools/call`만 게이트. claude.ai의 **공유 egress IP**가 60rpm 버킷을 나눠 쓰다 핸드셰이크에서 429를 맞으면 도구 목록이 통째로 유실되던 것이 원인 (v4.6.2의 폴백게이트 원칙을 일반 limiter까지 확장) (`src/server/http-server.ts`)
+- **`get_ordinance` 데드엔드**: `id`↔`ordinSeq` 불일치로 조례 본문 조회가 막히던 문제 → `id` 별칭 수용
+- **`get_article_history` 상시 0건**: `lsJoHstInf`에 날짜를 전달하지 않아 모든 법령의 조문 개정이력이 항상 0건이던 문제 → 날짜 미지정 시 전체기간(19480101~20991231) 자동 적용
+- **발견성**: `search_law` 설명에 조례·행정규칙 진입점 명시 (`src/tool-registry.ts`)
+
+## [4.6.5] - 2026-07-06
+
+### Fixed
+
+- **ToolAnnotations `destructiveHint` 추가**: ListTools 광고 annotations에 `destructiveHint: false` 명시. 9개 도구 모두 법제처 read-only 조회라 파괴적 동작 없음을 명시적으로 선언 — 일부 MCP 호스트(카카오 등) 등록 심사가 `destructiveHint` 정의를 필수로 요구해 경고가 발생하던 문제 해소 (`src/tool-registry.ts`)
+
+## [4.6.4] - 2026-07-05
+
+### Fixed
+
+- **MCP 도구 annotations 한글 title 제거**: claude.ai 웹 클라이언트가 비-ASCII(한글) `annotations.title`이 붙은 `tools/list`를 인식하지 못해 **"도구 없음"으로 뜨던** 문제 대응. 서버·도구 호출 자체는 정상이었고(curl·GPT·Claude Code 세션 모두 작동) claude.ai 웹만 실패. v4.5.1에서 추가한 `TOOL_TITLES`를 제거하고 영문 `name`을 그대로 노출 (`src/tool-registry.ts`)
+
+## [4.6.3] - 2026-07-05
+
+### Added
+
+- **`search_law` 자치법규 자동 폴백**: '광진구 복무 조례' 같은 쿼리가 `NOT_FOUND` + 키워드 축소 힌트만 반환해 LLM이 `discover_tools` → `execute_tool` 2턴을 돌아가던 문제. 쿼리에 '조례'가 포함되거나 ○○시/군/구 토큰이 있으면 `search_ordinance`를 자동 시도한다(행정규칙 폴백과 동일 패턴) (`src/tools/search.ts`)
+
+## [4.6.2] - 2026-07-05
+
+### Fixed
+
+- **폴백 쿼터 게이트를 `tools/call`만 적용**: `FALLBACK_RATE_LIMIT_RPM` 소진 시 `initialize`/`tools/list`까지 429로 막혀 claude.ai 커넥터가 **도구 목록 자체를 못 싣던** 문제 수정. 법제처 쿼터를 실제 소모하는 `tools/call`만 게이트한다 (`src/server/http-server.ts`)
+
+## [4.6.1] - 2026-07-05
+
+### Docs
+
+- **README 현행화**: v4.6.0 릴리스 노트(인용 내용검증 + law.go.kr JS 안티봇 우회) 추가, tagline을 "인용 검증(실존+내용)"으로 갱신
+- **README-EN 현행화**: 영문판이 v4.3부터 뒤처져 있던 것을 보강 — v4.4.0(도구 통폐합)·v4.4.1–4.4.3(안정성)·v4.5.0(시행예정)·v4.6.0 릴리스 노트 반영
+- 코드 변경 없음(문서 전용 패치)
+
+## [4.6.0] - 2026-07-04
+
+### Added — verify_citations 내용검증 (존재 + 내용 이중검증)
+
+- **조문 제목 내용검증**: `verify_citations` / `legal_analysis(mode=verify_citations)`가 기존 "조문 실존" 검증에 더해, 인용한 조문제목이 실제 조문제목과 일치하는지 대조. `민법 제750조(계약해제)`처럼 **존재하는 조문에 엉뚱한 제목을 붙인 내용 환각**을 `[CONTENT_MISMATCH]`로 탐지 (기존엔 750조만 실존하면 통과). LexDiff의 `citation-content-matcher`(정규화 후 exact 30자 공통 substring + 문자 bigram Jaccard ≥ 0.25) 이식 (`lib/citation-content-matcher.ts`). `제N조(제목)` 형태의 제목만 검증 대상, 개정이력·날짜·항호 참조 괄호는 제외
+
+### Added — law.go.kr JS 안티봇 우회 (클라우드 IP 대응)
+
+- **`location.assign` 리다이렉트 추적**: 클라우드 IP(GCP/AWS/Fly)에서 법제처가 API 데이터 대신 JS 안티봇 페이지를 반환할 때, 난독화 URL(concat/substr 2패턴)을 파싱해 토큰 URL로 우회 (`lib/law-antibot.ts`, 최대 3홉, 토큰 URL 404 시 원본 재시도). 로컬/등록 IP에선 no-op. `fetch-with-retry`가 law.go.kr 호스트 응답에만 적용해 방어층 추가
+
+### Tests
+
+- `law-antibot.test.ts`(3), `citation-content-matcher.test.ts`(8) 신설 — vitest 44 케이스 그린
+
+## [4.5.2] - 2026-07-04
+
+### Fixed
+
+- **광고 서비스명 정정**: ListTools 광고 접두를 PlayMCP 등록명과 일치하도록 「국가법령정보 MCP」 → `Korean-law-mcp`로 변경. 서비스명 검증은 등록폼 이름과 정확히 일치해야 통과 (`src/tool-registry.ts`)
+
+## [4.5.1] - 2026-07-04
+
+### Added
+
+- **PlayMCP 등록용 tool annotations**: 노출 도구의 ListTools 광고에 MCP annotations(read-only 조회·멱등·openWorld)를 추가하고 description에 서비스명을 접두. 원본 `allTools` 정의는 그대로 두고 `registerTools` 광고 시점에만 주입해 STDIO·HTTP 양쪽에 반영. PlayMCP 검증 2건(annotations 미정의·서비스명 누락) 해소 (`src/tool-registry.ts`)
+
+## [4.5.0] - 2026-07-03
+
+### Added
+
+- **`search_law` 시행예정 법령 감지**: 제명변경 개정이 공포~시행 사이에 있으면 신명칭 검색 시 '정확매칭 없음'만 떠서 **LLM이 "법령 없음"으로 오판하던** 문제 해결(「데이터기반행정 활성화에 관한 법률」 → 「인공지능 및 데이터 기반 행정 활성화에 관한 법률」 사례). `target=eflaw` 보조검색으로 시행예정만 추출해 MST별 시행일을 병합하고, **제명변경·개정예정·미시행 신규** 3분류 노트를 생성한다 (`src/lib/upcoming-laws.ts`)
+- 검색 결과에 시행예정 노트를 병기하고, 현행이 0건이면 시행예정을 단독 안내(효력 없음 경고 포함). `api-client.searchLaw`에 `target`(law|eflaw) 파라미터 추가. 시행예정본 조회 힌트에 `efYd`를 필수 병기 — `efYd` 없이는 법제처 API가 404를 반환
+
+## [4.4.4] - 2026-07-01
+
+### Fixed
+
+- **번호 없는 단일 별표 매칭 폴백**: `get_annexes`가 별표 선택값("별표1" 등)으로 매칭에 실패해도, 해당 법령의 별표가 정확히 1건뿐이면 그 별표를 반환한다. 「여권법 시행령」의 '수수료 및 사무의 대행에 드는 비용(제39조 관련)'처럼 **별표번호가 `000000`인 번호 없는 단일 별표**는 LLM이 임의로 "별표1"로 호출하면 `findMatchingAnnex` 매칭 0건 → `NOT_FOUND`로 새어 "참조 조문 부족" 답변을 유발했음. 별표가 유일 1건이면 선택값이 불일치해도 정답이 명확하므로 폴백 (`src/tools/annex.ts`)
+  - 회귀 안전: 별표가 여러 건인 법령(관세법 24건)에서 존재하지 않는 번호는 `NOT_FOUND` 유지
+
+> 이 변경(`fde094c`)의 커밋 메시지에는 `v4.4.3`으로 적혀 있으나, 원격에서 4.4.3(zod `^4` pin)이 먼저 npm에 게시되어 같은 버전으로는 publish가 거부됐습니다. 4.4.4로 올려 실제 배포했습니다.
+
+## [4.4.3] - 2026-06-29
+
+### Fixed — zod v4 고정 (신규 설치 크래시 해결)
+
+- **`z.toJSONSchema is not a function` 크래시**: `dependencies`가 zod를 `^3.25.76 || ^4.0.0`으로 선언했으나 코드는 zod v4 전용 API인 `z.toJSONSchema()`를 호출. 새 npm 설치가 zod 3.25를 해석하면 `listTools` 첫 호출에서 크래시. zod를 `^4`로 고정해 해결
+
 ## [4.4.2] - 2026-06-18
 
 ### Fixed — 행정규칙 별표/서식 조회 복구 (#50, #49, #51)

@@ -1,6 +1,13 @@
 # CLAUDE.md
 
-Korean Law MCP Server v4.4.1 - 법제처 42개 API → 9개 통합 도구 (내부 97개) + 9개 시나리오 + 자연어 CLI + HTTP stateless + 판례 토큰 74% 감축 + **legal_research (체인 8종 통합, task 파라미터)** + **legal_analysis (인용검증·판례생사·행위시법·영향그래프 통합, mode 파라미터)** + **time_travel (시점 diff)** + **action_plan (이럴 땐 이렇게, 5단계 안내)**
+> ## ⚠️ 배포 — 통합 호스트 (2026-07-02부터)
+>
+> 프로덕션은 이 레포가 아니라 **[gomdori-mcp](https://github.com/chrisryugj/gomdori-mcp) 통합 호스트**(fly 앱 `korean-law-mcp` 1대, MCP 5종 동거)가 서빙한다.
+> - 공식 주소: `https://mcp.gomdori.app/law` (구 `korean-law-mcp.fly.dev/mcp`는 하위호환으로 유지)
+> - **반영 절차**: 이 레포 커밋·푸시 → `npm publish` → `~/workspace/gomdori-mcp/Dockerfile`의 `korean-law-mcp@X.Y.Z` 핀 갱신 → `cd ~/workspace/gomdori-mcp && fly deploy -c fly.production.toml`
+> - **🚫 이 레포에서 `fly deploy` 직접 실행 절대 금지** — 통합 이미지를 law 단독 이미지로 덮어써 stats·patent·archhub·school까지 전부 죽는다. 자세한 배경: [docs/FLY-COST.md](docs/FLY-COST.md)
+
+Korean Law MCP Server v4.9.1 - 법제처 42개 API → 10개 통합 도구 (내부 98개) + 9개 시나리오 + 자연어 CLI + HTTP stateless + 판례 토큰 74% 감축 + **legal_research (체인 8종 통합, task 파라미터)** + **legal_analysis (인용검증·판례생사·행위시법·영향그래프 통합, mode 파라미터)** + **time_travel (시점 diff)** + **action_plan (이럴 땐 이렇게, 5단계 안내)** + **시행예정 감지 (search_law가 제명변경·미시행 개정 자동 병기)** + **ordinance_radar (조례 정비 레이더 — 근거 상위법 개정 자동 대조, v4.7.0)** + **인용 검증 표기 내성 (낫표·가운뎃점·`같은 법` 조응, v4.9.0)**
 
 ## Structure
 
@@ -8,8 +15,8 @@ Korean Law MCP Server v4.4.1 - 법제처 42개 API → 9개 통합 도구 (내�
 src/
 ├── index.ts              # 엔트리포인트 (STDIO/HTTP 모드)
 ├── cli.ts                # CLI v2.0 (자연어 라우팅 + REPL)
-├── tool-registry.ts      # 97개 도구 등록, V3_EXPOSED 9개만 노출 (TOOL_COUNTS 파생값)
-├── tools/                # 도구 구현 (49개 파일, 각 200줄 미만)
+├── tool-registry.ts      # 98개 도구 등록, V3_EXPOSED 10개만 노출 (TOOL_COUNTS 파생값)
+├── tools/                # 도구 구현 (50개 파일, 각 200줄 미만)
 ├── lib/
 │   ├── api-client.ts     # API 클라이언트 (throwIfError/checkHtmlError 통일)
 │   ├── query-router.ts   # 자연어 → 도구 라우팅 엔진 (verify/비교/시간필터 패턴 포함)
@@ -19,6 +26,7 @@ src/
 │   ├── errors.ts         # 에러 표준화
 │   ├── schemas.ts        # 날짜/응답크기 검증 (truncateResponse)
 │   ├── search-normalizer.ts  # 검색어 정규화 (LexDiff, 약칭 52개)
+│   ├── upcoming-laws.ts  # 시행예정 법령 감지 (eflaw 보조검색 — 제명변경·미시행 개정 병기)
 │   ├── law-parser.ts     # JO 코드 변환 (LexDiff)
 │   ├── annex-file-parser.ts  # 별표 파일 파서 (kordoc 통합 파서)
 │   ├── tool-profiles.ts  # 도구 카테고리 + TOOL_ALIASES (한국어 별칭 매칭)
@@ -81,6 +89,7 @@ korean-law get_law_text --mst 160001 --jo "제1조"
 - `RATE_LIMIT_RPM`: IP당 분당 요청 한도 (기본 `60`)
 - `FALLBACK_RATE_LIMIT_RPM`: 자체 키 없는 요청의 서버 LAW_OC 폴백 전역 상한 (기본 `120`, `0`이면 폴백 비활성)
 - `MCP_BODY_LIMIT`: POST body 한도 (기본 `100kb`)
+- `MCP_MAX_BATCH_CALLS`: 단일 POST(JSON-RPC 배치)에 허용하는 tools/call 최대 개수 (기본 `20`) — 배치 증폭으로 rate limit·폴백 쿼터 우회 차단
 
 ## Domain Knowledge
 
@@ -130,13 +139,14 @@ get_law_text(mst, jo="006300") → 제63조(휴직) 조회
 |------|------|
 | `cli.ts` | CLI v2.0 — 자연어 라우팅 + REPL |
 | `lib/query-router.ts` | 자연어 → 도구 자동 라우팅 (verify/비교/시간필터/impact_map/time_travel/action_plan 포함) |
-| `tool-registry.ts` | 97개 도구 정의, V3_EXPOSED 9개 노출 (TOOL_COUNTS 파생값) |
+| `tool-registry.ts` | 98개 도구 정의, V3_EXPOSED 10개 노출 (TOOL_COUNTS 파생값) |
 | `tools/legal-research.ts` | chain_* 8개 통합 진입점 — task 파라미터 디스패치 (v4.4.0) |
 | `tools/legal-analysis.ts` | 킬러피처 4개 통합 진입점 — mode 파라미터 디스패치 (v4.4.0) |
 | `tools/verify-citations.ts` | LLM 환각 방지 인용 검증 (v3.5 killer feature) |
 | `tools/impact-map.ts` | 조문 영향 그래프 + mermaid 시각화 (v4.0 killer feature) |
 | `tools/cite-check.ts` | 판례 생사 확인 — 후속 인용 역추적 + 별칭 추적 변경·폐기 감지 (v4.3 killer feature) |
 | `tools/applicable-law.ts` | 행위시법 판단 — 시점 적용 버전 특정 + 부칙 경과규정 발췌 (v4.3 killer feature) |
+| `tools/ordinance-radar.ts` | 조례 정비 레이더 — 제1조(목적) 근거법 추출 + 상위법 개정 대조 자동 플래그 (v4.7.0 killer feature) |
 | `tools/unified-decisions.ts` | 17개 도메인 통합 + compactLongSections 후처리 축약 |
 | `lib/decision-compact.ts` | 판례 토큰 최적화 (compactBody/densify/stripRepeatedSummary/compactLongSections) |
 | `lib/fetch-with-retry.ts` | 30초 타임아웃 + 3회 재시도 + maskSensitiveUrl |
@@ -154,6 +164,6 @@ get_law_text(mst, jo="006300") → 제63조(휴직) 조회
 ## Docs
 
 상세 정보는 별도 문서 참조:
-- [docs/API.md](docs/API.md) - 도구 레퍼런스 (9개 노출, 미노출 도구는 execute_tool 또는 직접 호출로 접근)
+- [docs/API.md](docs/API.md) - 도구 레퍼런스 (10개 노출, 미노출 도구는 execute_tool 또는 직접 호출로 접근)
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - 시스템 설계, 데이터 플로우
 - [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) - 개발 가이드

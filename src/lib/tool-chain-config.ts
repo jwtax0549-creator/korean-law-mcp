@@ -71,7 +71,9 @@ export const SEARCH_DETAIL_CHAINS: Record<string, SearchDetailChain> = {
   search_admin_rule: {
     detailTool: "get_admin_rule",
     detailParam: "id",
-    idRegex: /행정규칙ID:\s*(\S+)/,  // 행정규칙은 [ID] 형식이 아님
+    // 행정규칙은 [ID] 형식이 아님. lawService.do?target=admrul&ID= 가 받는 값은
+    // '행정규칙ID'(4~5자리)가 아니라 '행정규칙일련번호'(13자리)다 (#72)
+    idRegex: /행정규칙일련번호:\s*(\S+)/,
   },
   search_ordinance: {
     detailTool: "get_ordinance",

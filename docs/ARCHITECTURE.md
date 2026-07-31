@@ -17,7 +17,7 @@
 │               Korean Law MCP Server (v2.3.2)                  │
 │                                                               │
 │  ┌───────────────────────────────────────────────────────┐   │
-│  │     Tool Registry (89 Zod-Validated Tools)            │   │
+│  │     Tool Registry (98 Zod-Validated Tools)            │   │
 │  │         tool-registry.ts → allTools[]                 │   │
 │  ├───────────────────────────────────────────────────────┤   │
 │  │  검색 (11)   │ 조회 (9)      │ 분석 (9)              │   │
@@ -60,7 +60,7 @@
 
 1. **Separation of Concerns**: Tools → Shared Libs → API Client
 2. **Single Responsibility**: 파일당 200줄 미만, 단일 기능
-3. **Centralized Tool Registry**: 64개 도구를 `tool-registry.ts`의 `allTools[]`에 등록
+3. **Centralized Tool Registry**: 98개 도구를 `tool-registry.ts`의 `allTools[]`에 등록
 4. **Type Safety**: TypeScript strict mode + Zod validation
 5. **Stateless HTTP**: MCP StreamableHTTP stateless 모드 — 요청마다 fresh Server+Transport, AsyncLocalStorage로 요청별 API 키 격리 (재시작·스케일아웃 내성)
 6. **Network Resilience**: 30s timeout, 3 retries with exponential backoff
@@ -74,7 +74,7 @@
 
 - MCP 서버 초기화
 - CLI 인자 파싱 (`--mode stdio|sse|http`, `--port`)
-- `registerTools(server, apiClient)` 호출로 64개 도구 일괄 등록
+- `registerTools(server, apiClient)` 호출로 98개 도구 일괄 등록
 
 ### Tool Registry (`src/tool-registry.ts`)
 
@@ -85,7 +85,7 @@
 
 ### CLI (`src/cli.ts`)
 
-- `korean-law <tool> --param value` 형태로 64개 도구 직접 실행
+- `korean-law <tool> --param value` 형태로 98개 도구 직접 실행
 - `korean-law list [--category ...]`: 도구 목록/카테고리 필터
 - `korean-law help <tool>`: 도구 상세 파라미터
 - `--json-input`: JSON으로 복합 파라미터 전달
@@ -177,13 +177,14 @@ get_annexes(lawName="여권법 시행령", bylSeq="000000")
 - **fly.toml**: `nrt` 리전, 256MB 메모리, auto suspend/resume
 - **Dockerfile**: multi-stage build (node:20-alpine)
 - **Health check**: `GET /health` (30초 간격)
-- **Endpoint**: `https://korean-law-mcp.fly.dev/mcp`
+- **Endpoint**: `https://mcp.gomdori.app/law`
+  - 구 `https://korean-law-mcp.fly.dev/mcp` 도 하위호환으로 계속 동작한다 — 통합 호스트가 이 fly 앱 위에 떠 있고, 프리픽스 없는 요청을 law 로 원경로 전달하기 때문. 신규 안내는 공식 주소로.
 
 ```json
 {
   "mcpServers": {
     "korean-law": {
-      "url": "https://korean-law-mcp.fly.dev/mcp"
+      "url": "https://mcp.gomdori.app/law"
     }
   }
 }
@@ -210,6 +211,6 @@ docker run -e LAW_OC=your-key -p 3000:3000 korean-law-mcp
 
 ## Related Docs
 
-- [API.md](API.md) - 64개 도구 레퍼런스
+- [API.md](API.md) - 98개 도구 레퍼런스
 - [DEVELOPMENT.md](DEVELOPMENT.md) - 개발자 가이드
 - [README.md](../README.md) - 시작 가이드

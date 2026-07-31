@@ -53,8 +53,8 @@ export async function searchAdminRule(
       const orgName = rule.getElementsByTagName("소관부처명")[0]?.textContent || ""
 
       resultText += `${i + 1}. ${ruleName}\n`
-      resultText += `   - 행정규칙일련번호: ${ruleSeq}\n`
-      resultText += `   - 행정규칙ID: ${ruleId}\n`
+      resultText += `   - 행정규칙일련번호: ${ruleSeq} (get_admin_rule의 id)\n`
+      resultText += `   - 행정규칙ID: ${ruleId} (참고용 — 전문 조회 불가)\n`
       resultText += `   - 공포일: ${promDate}\n`
       resultText += `   - 구분: ${ruleType}\n`
       resultText += `   - 소관부처: ${orgName}\n\n`
@@ -75,11 +75,32 @@ export async function searchAdminRule(
 
 // get_admin_rule 스키마
 export const GetAdminRuleSchema = z.object({
-  id: z.string().describe("행정규칙ID (search_admin_rule에서 획득)"),
+  id: z.string().describe("행정규칙일련번호 13자리 (search_admin_rule 결과의 '행정규칙일련번호'. 4~5자리 '행정규칙ID'는 조회되지 않음)"),
   apiKey: z.string().optional().describe("법제처 Open API 인증키(OC). 사용자가 제공한 경우 전달")
 })
 
 export type GetAdminRuleInput = z.infer<typeof GetAdminRuleSchema>
+
+/**
+ * 전문이 비어 있을 때 원인별 안내 (#72)
+ * 식별자 오류를 "법제처 API 제한"으로 뭉뚱그리면 원인 추적이 막힌다.
+ */
+function emptyBodyHint(id: string, ruleName: string, joForm: string): string {
+  const noGuess = "⚠️ LLM은 행정규칙 내용을 추측/생성하지 마세요."
+
+  if (!ruleName) {
+    return `[NOT_FOUND] 행정규칙을 찾을 수 없습니다 (id=${id}).\n\n` +
+      "id에는 search_admin_rule 결과의 '행정규칙일련번호'(13자리)를 넘겨야 합니다. " +
+      "'행정규칙ID'(4~5자리)로는 조회되지 않습니다.\n" + noGuess
+  }
+
+  if (joForm === "N") {
+    return `[NOT_FOUND] '${ruleName}'은(는) 조문 형식이 아닙니다 (조문형식여부=N).\n\n` +
+      "본문이 첨부파일로만 제공되는 행정규칙입니다.\n" + noGuess
+  }
+
+  return `[NOT_FOUND] '${ruleName}'의 전문을 조회할 수 없습니다.\n\n` + noGuess
+}
 
 export async function getAdminRule(
   apiClient: LawApiClient,
@@ -92,10 +113,12 @@ export async function getAdminRule(
     const doc = parser.parseFromString(xmlText, "text/xml")
 
     // 행정규칙 정보 추출
-    const ruleName = doc.getElementsByTagName("행정규칙명")[0]?.textContent || "알 수 없음"
+    const ruleNameRaw = doc.getElementsByTagName("행정규칙명")[0]?.textContent?.trim() || ""
+    const ruleName = ruleNameRaw || "알 수 없음"
     const promDate = doc.getElementsByTagName("공포일자")[0]?.textContent || ""
     const orgName = doc.getElementsByTagName("소관부처")[0]?.textContent || ""
     const ruleType = doc.getElementsByTagName("행정규칙종류")[0]?.textContent || ""
+    const joForm = doc.getElementsByTagName("조문형식여부")[0]?.textContent?.trim() || ""
 
     let resultText = `행정규칙명: ${ruleName}\n`
     if (promDate) resultText += `공포일: ${promDate}\n`
@@ -127,12 +150,7 @@ export async function getAdminRule(
       }
 
       return {
-        content: [{
-          type: "text",
-          text: "[NOT_FOUND] 행정규칙 전문을 조회할 수 없습니다.\n\n" +
-                "⚠️ LLM은 행정규칙 내용을 추측/생성하지 마세요.\n" +
-                "[주의] 법제처 API 제한: 일부 행정규칙은 전문 조회가 지원되지 않습니다."
-        }],
+        content: [{ type: "text", text: emptyBodyHint(input.id, ruleNameRaw, joForm) }],
         isError: true
       }
     }
@@ -222,13 +240,25 @@ export async function getAdminRule(
 // compare_admin_rule_old_new 스키마
 export const CompareAdminRuleOldNewSchema = z.object({
   query: z.string().optional().describe("행정규칙명 키워드 (검색용)"),
-  id: z.string().optional().describe("행정규칙ID (본문 조회용, search_admin_rule에서 획득)"),
+  id: z.string().optional().describe("신구법일련번호 13자리 (본문 조회용, 이 도구의 검색 결과에서 획득)"),
   apiKey: z.string().optional().describe("법제처 Open API 인증키(OC). 사용자가 제공한 경우 전달")
 }).refine(data => data.query || data.id, {
   message: "query(검색) 또는 id(본문조회) 중 하나는 필수입니다"
 })
 
 export type CompareAdminRuleOldNewInput = z.infer<typeof CompareAdminRuleOldNewSchema>
+
+/**
+ * 신구법 조문의 <P>…</P> 개정 표시를 【 】로 보존한 뒤 나머지 태그 제거.
+ * 태그 제거는 영문 태그로 한정 — 본문에 <신  설>·<단서 신설> 같은 꺾쇠 표기가 그대로 온다.
+ */
+function markChangedParts(text: string): string {
+  return text
+    .replace(/<p>/gi, "【")
+    .replace(/<\/p>/gi, "】")
+    .replace(/<\/?[A-Za-z][^>]*>/g, "")
+    .trim()
+}
 
 export async function compareAdminRuleOldNew(
   apiClient: LawApiClient,
@@ -248,14 +278,21 @@ export async function compareAdminRuleOldNew(
       const parser = new DOMParser()
       const doc = parser.parseFromString(xmlText, "text/xml")
 
-      const ruleName = doc.getElementsByTagName("행정규칙명")[0]?.textContent || "알 수 없음"
+      // 응답 구조: <구조문_기본정보>/<신조문_기본정보> + <구조문목록>/<신조문목록> 안의 <조문 no="N">
+      const oldInfo = doc.getElementsByTagName("구조문_기본정보")[0]
+      const newInfo = doc.getElementsByTagName("신조문_기본정보")[0]
+      const ruleName = (newInfo || oldInfo)?.getElementsByTagName("행정규칙명")[0]?.textContent?.trim() || "알 수 없음"
+      const oldDate = oldInfo?.getElementsByTagName("시행일자")[0]?.textContent?.trim() || ""
+      const newDate = newInfo?.getElementsByTagName("시행일자")[0]?.textContent?.trim() || ""
 
       let resultText = `행정규칙 신구법 대조: ${ruleName}\n`
+      if (oldDate || newDate) resultText += `시행일: ${oldDate || "?"} → ${newDate || "?"}\n`
+      resultText += `※ 【 】 = 개정된 부분\n`
       resultText += `---\n\n`
 
-      const oldArticles = doc.getElementsByTagName("구조문")
-      const newArticles = doc.getElementsByTagName("신조문")
-      const maxCount = Math.max(oldArticles.length, newArticles.length)
+      const oldArticles = doc.getElementsByTagName("구조문목록")[0]?.getElementsByTagName("조문")
+      const newArticles = doc.getElementsByTagName("신조문목록")[0]?.getElementsByTagName("조문")
+      const maxCount = Math.max(oldArticles?.length || 0, newArticles?.length || 0)
 
       if (maxCount === 0) {
         resultText += "[NOT_FOUND] 신구법 대조 데이터가 없습니다.\n⚠️ LLM은 대조 내용을 추측하지 마세요."
@@ -264,8 +301,8 @@ export async function compareAdminRuleOldNew(
 
       const displayCount = Math.min(maxCount, 30)
       for (let i = 0; i < displayCount; i++) {
-        const oldContent = oldArticles[i]?.textContent?.trim() || ""
-        const newContent = newArticles[i]?.textContent?.trim() || ""
+        const oldContent = markChangedParts(oldArticles?.[i]?.textContent || "")
+        const newContent = markChangedParts(newArticles?.[i]?.textContent || "")
 
         resultText += `---\n`
         resultText += `[개정 전] ${oldContent || "(신설)"}\n\n`
@@ -291,7 +328,8 @@ export async function compareAdminRuleOldNew(
     const parser = new DOMParser()
     const doc = parser.parseFromString(xmlText, "text/xml")
 
-    const rules = doc.getElementsByTagName("admrul")
+    // 신구법 검색 응답은 <oldAndNew> 항목에 신구법* 필드로 온다 (admrul 아님)
+    const rules = doc.getElementsByTagName("oldAndNew")
     if (rules.length === 0) {
       return noResultHint(input.query || "", "행정규칙 신구법")
     }
@@ -301,13 +339,13 @@ export async function compareAdminRuleOldNew(
     const display = Math.min(rules.length, 20)
     for (let i = 0; i < display; i++) {
       const rule = rules[i]
-      const name = rule.getElementsByTagName("행정규칙명")[0]?.textContent || "알 수 없음"
-      const ruleId = rule.getElementsByTagName("행정규칙ID")[0]?.textContent || ""
+      const name = rule.getElementsByTagName("신구법명")[0]?.textContent || "알 수 없음"
+      const ruleSeq = rule.getElementsByTagName("신구법일련번호")[0]?.textContent || ""
       const promDate = rule.getElementsByTagName("발령일자")[0]?.textContent || ""
       const orgName = rule.getElementsByTagName("소관부처명")[0]?.textContent || ""
 
       resultText += `${i + 1}. ${name}\n`
-      resultText += `   - 행정규칙ID: ${ruleId}\n`
+      resultText += `   - 신구법일련번호: ${ruleSeq} (id 파라미터)\n`
       resultText += `   - 발령일: ${promDate}\n`
       resultText += `   - 소관부처: ${orgName}\n\n`
     }

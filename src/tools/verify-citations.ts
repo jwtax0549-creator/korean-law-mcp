@@ -18,11 +18,12 @@
 import { z } from "zod"
 import type { LawApiClient } from "../lib/api-client.js"
 import { buildJO } from "../lib/law-parser.js"
-import { findLaws, type LawInfo } from "../lib/law-search.js"
+import { findLaws, findRepealedLaw, looseMatchLawName, type LawInfo } from "../lib/law-search.js"
 import { parseHangNumber } from "../lib/article-parser.js"
 import { truncateResponse } from "../lib/schemas.js"
 import { formatToolError } from "../lib/errors.js"
 import { toArray } from "../lib/xml-parser.js"
+import { matchCitationContent } from "../lib/citation-content-matcher.js"
 
 export const VerifyCitationsSchema = z.object({
   text: z.string().min(1).describe("검증할 법률 텍스트 (LLM 답변/계약서/판결문 등). 조문 인용이 포함된 문자열"),
@@ -41,6 +42,7 @@ interface ParsedCitation {
   ho?: number
   joCode: string
   displayArticle: string
+  claimTitle?: string
 }
 
 // 조문 인용 패턴 — "제N조", "제N조의M", "제N조 제K항 제L호"
@@ -52,9 +54,104 @@ const LAW_NAME_REGEX = /([가-힣][가-힣·ㆍ\s]{0,30}?(?:법률|법|시행령
 // 법령명 앞에 붙는 한국어 접속사·부사·수식어 제거 — "또한 상법" → "상법"
 const LAW_NAME_STOPWORDS = /^(또한|그리고|하며|따라서|따라|위해|위하여|의한|의하여|따른|해당|관련|이에|아울러|본|이|저|그|또|및|또는|혹은|한편|더불어|이어|이는|즉|결국|결과적으로|실제로|특히)\s+/u
 
-function parseCitations(text: string, maxCitations: number): ParsedCitation[] {
+// 그 자체로는 법령명이 될 수 없는 접미사 어절. 후보 축약이 앞 어절을 다 떼고 나면
+// 이런 토큰만 남는데("같은 법 시행규칙" → "시행규칙"), 검색에 넣으면 어떤 문서에서든
+// 무관한 법령을 물어온다(#70: "시행규칙" → '119긴급신고의 관리 및 운영에 관한 법률 시행규칙').
+const LAW_NAME_SUFFIX_TOKENS = new Set(["법", "법률", "시행령", "시행규칙", "규칙", "규정", "조례"])
+
+// 캡처된 법령명 앞에 내용어 수식어가 남을 수 있음(예: "절도죄는 형법", "이혼시 재산분할은 민법").
+// 앞 어절을 하나씩 떼며 검색 후보를 만든다. 전체(full)를 먼저 두어 다어절 법령명
+// ("전자상거래 등에서의 소비자보호에 관한 법률")은 그대로 매칭되고, 수식어만 붙은 경우는
+// 뒤쪽 후보에서 실제 법령명("형법"·"민법")이 매칭된다. 붙어쓴 법령명은 어절 분리되지 않아 보존.
+//
+// 모든 어절이 접미사뿐인 후보는 버린다(#70). 후보가 하나도 남지 않으면 빈 배열을 반환하며,
+// 이는 "법령명을 특정할 수 없음" 신호다 — 호출자는 검색을 시도하지 말고 ⚠로 보고해야 한다.
+export function lawNameCandidates(lawName: string): string[] {
+  const tokens = lawName.split(/\s+/).filter(Boolean)
+  const candidates: string[] = []
+  for (let i = 0; i < tokens.length; i++) {
+    const slice = tokens.slice(i)
+    if (slice.every((t) => LAW_NAME_SUFFIX_TOKENS.has(t))) continue
+    const cand = slice.join(" ")
+    if (cand.length >= 2) candidates.push(cand)
+  }
+  if (candidates.length > 0) return candidates
+  // 어절 분해가 무의미한 경우(공백 없는 단일 토큰 등)는 원본을 그대로 후보로 쓴다.
+  // 단, 원본 자체가 접미사뿐이면 후보 없음 — 무관 법령을 물어오는 것보다 모른다고 하는 게 맞다.
+  const whole = lawName.trim()
+  const wholeIsSuffixOnly = whole
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((t) => LAW_NAME_SUFFIX_TOKENS.has(t))
+  return whole.length >= 2 && !wholeIsSuffixOnly ? [whole] : []
+}
+
+// looseMatchLawName은 lib/law-search로 승격됨 (applicable_law/impact_map 가드와 공용).
+// 기존 import 경로 호환을 위해 재수출.
+export { looseMatchLawName }
+
+// 인용 직전 문맥에서 법령명을 추출.
+// 「법령명」 제8조 는 법제처·판결문·실무 문서의 표준 인용 표기인데, 닫는 낫표가
+// LAW_NAME_REGEX의 $ 앵커를 막아 법령명이 **전혀** 추출되지 않았다(→ "법령명 추출 실패").
+// 이 경우 조문 실존 검증에 진입하지 못해 없는 조문·없는 항도 ✗로 잡히지 않는다.
+// = 환각 탐지가 조용히 미가동. 따라서 닫는 인용기호를 먼저 벗긴다.
+export function extractLawName(lookbackRaw: string): string | undefined {
+  const lookback = lookbackRaw.replace(/[\s」』】〕>]+$/, "")
+  const m = lookback.match(LAW_NAME_REGEX)
+  if (!m) return undefined
+  const name = m[1].replace(/\s+/g, " ").trim().replace(LAW_NAME_STOPWORDS, "").trim()
+  return name.length >= 2 ? name : undefined
+}
+
+// "같은 법"·"동법" 조응(anaphora). 「A법」 제N조 및 같은 법 시행규칙 제M조 는 법제처 조문·
+// 행정규칙·관공서 서식의 표준 표기다. 조응을 해소하지 않으면 법령명이 "같은 법 시행규칙"으로
+// 남아 조문 검증에 진입하지 못한다(#70).
+const LAW_ANAPHORA_REGEX = /^(?:같은|동)\s*법(?:률)?(?=\s|$)/
+// 조응 판별은 **추출된 법령명이 아니라 인용 직전 문맥의 꼬리**를 본다. LAW_NAME_REGEX의 문자
+// 클래스가 공백·개행을 포함해서 앞 인용의 잔재를 삼키는 경우가 있고("제250조\n\n같은 법 시행령"
+// → "조 같은 법 시행령"), 그러면 조응인데도 조응으로 안 보인다.
+// 선행 `(?:^|[^가-힣])`은 "노동법"의 '동법'을 조응으로 오인하지 않기 위한 경계다.
+const LAW_ANAPHORA_TAIL_REGEX =
+  /(?:^|[^가-힣])((?:같은|동)\s*법(?:률)?(?:\s*(?:시행령|시행규칙))?)\s*$/
+// 조응이 가리키는 것은 모법이므로, 선행 법령명이 시행령·시행규칙이면 모법으로 되돌린 뒤
+// 이번 인용의 접미사를 붙인다. ("A법 시행령" + "같은 법 시행규칙" → "A법 시행규칙")
+const SUBORDINATE_SUFFIX_REGEX = /\s*(?:시행령|시행규칙)$/
+
+/**
+ * "같은 법 시행규칙" 류의 조응을 선행 법령명으로 해소한다.
+ * @param antecedent 같은 문서에서 직전에 추출된 법령명. 없으면 해소 불가.
+ * @returns 해소된 법령명. 조응이 아니면 입력 그대로, 해소 불가면 undefined
+ *   (선행 법령명 없이 "같은 법"만 있는 텍스트는 법령명을 특정할 수 없다는 게 정직한 답이다).
+ */
+export function resolveLawAnaphora(lawName: string, antecedent?: string): string | undefined {
+  if (!LAW_ANAPHORA_REGEX.test(lawName)) return lawName
+  if (!antecedent) return undefined
+  const suffix = lawName.replace(LAW_ANAPHORA_REGEX, "").trim()
+  const base = antecedent.replace(SUBORDINATE_SUFFIX_REGEX, "").trim()
+  if (!base) return undefined
+  return suffix ? `${base} ${suffix}` : base
+}
+
+// 인용 바로 뒤 "(제목)"에서 조문 제목 claim 추출 — 내용검증용.
+// 개정이력·날짜·항호 참조 괄호는 조문 제목이 아니므로 제외.
+function extractClaimTitle(after: string): string | undefined {
+  const m = after.match(/^\s*\(([^)]{1,40})\)/)
+  if (!m) return undefined
+  const t = m[1].trim()
+  if (!/[가-힣]/.test(t)) return undefined                    // 한글 없으면 제목 아님
+  if (/(개정|신설|삭제|전문개정|본조신설)/.test(t)) return undefined  // 개정이력 괄호
+  if (/\d{4}\s*\.\s*\d/.test(t)) return undefined             // 날짜(2020. 1. …)
+  if (/^제?\s*\d+\s*(항|호|목|조)/.test(t)) return undefined    // 항/호/목 참조
+  return t
+}
+
+// export: 조응 해소·법령명 역추적이 순회 상태에 의존하므로 단위 테스트로 고정한다.
+export function parseCitations(text: string, maxCitations: number): ParsedCitation[] {
   const citations: ParsedCitation[] = []
   const seen = new Set<string>()
+  // "같은 법"·"동법" 조응 해소용 — 문서 순서대로 순회하므로 직전에 추출된 법령명을 들고 간다.
+  let antecedent: string | undefined
+  let antecedentEnd = 0
 
   ARTICLE_REGEX.lastIndex = 0
   let m: RegExpExecArray | null
@@ -64,12 +161,23 @@ function parseCitations(text: string, maxCitations: number): ParsedCitation[] {
 
     // 직전 30자에서 법령명 역추적
     const lookbackStart = Math.max(0, m.index - 30)
-    const lookback = text.slice(lookbackStart, m.index).replace(/\s+$/, "")
-    const lawMatch = lookback.match(LAW_NAME_REGEX)
-    let lawName: string | undefined = lawMatch
-      ? lawMatch[1].replace(/\s+/g, " ").trim().replace(LAW_NAME_STOPWORDS, "").trim()
-      : undefined
-    if (lawName && lawName.length < 2) lawName = undefined
+    const lookback = text.slice(lookbackStart, m.index)
+
+    let lawName: string | undefined
+    const anaphora = lookback.match(LAW_ANAPHORA_TAIL_REGEX)
+    if (anaphora) {
+      // 문단이 바뀌면 승계하지 않는다 — 빈 줄 뒤는 다른 법령을 다루는 단락일 수 있어
+      // 잘못 승계하면 무관한 법령을 근거로 ✓/✗를 내는 더 나쁜 오답이 된다.
+      const paragraphBroke = /\n\s*\n/.test(text.slice(antecedentEnd, m.index))
+      lawName = resolveLawAnaphora(anaphora[1].trim(), paragraphBroke ? undefined : antecedent)
+      antecedentEnd = m.index
+    } else {
+      lawName = extractLawName(lookback)
+      if (lawName) {
+        antecedent = lawName
+        antecedentEnd = m.index
+      }
+    }
 
     const jo = parseInt(joStr, 10)
     const joBranch = branchStr ? parseInt(branchStr, 10) : undefined
@@ -86,6 +194,10 @@ function parseCitations(text: string, maxCitations: number): ParsedCitation[] {
     if (seen.has(key)) continue
     seen.add(key)
 
+    // 조문 번호 바로 뒤 "(제목)" 캡처 — 내용검증(matchCitationContent)용
+    const afterIdx = m.index + raw.length
+    const claimTitle = extractClaimTitle(text.slice(afterIdx, afterIdx + 45))
+
     citations.push({
       raw: raw.trim(),
       lawName,
@@ -95,9 +207,16 @@ function parseCitations(text: string, maxCitations: number): ParsedCitation[] {
       ho: hoStr ? parseInt(hoStr, 10) : undefined,
       joCode,
       displayArticle,
+      claimTitle,
     })
   }
   return citations
+}
+
+// "20220325" → "2022-03-25". 형식 이상이면 원본 그대로.
+function formatYmd(ymd?: string): string {
+  if (!ymd || !/^\d{8}$/.test(ymd)) return ymd || ""
+  return `${ymd.slice(0, 4)}-${ymd.slice(4, 6)}-${ymd.slice(6, 8)}`
 }
 
 function formatCitationLabel(c: ParsedCitation, officialName?: string): string {
@@ -120,24 +239,40 @@ async function verifyOne(
   }
 
   // 1단계: 법령 검색 — findLaws가 관련도 정렬까지 처리 (민법→난민법 오매칭 방지)
+  // 앞 수식어가 남은 캡처("절도죄는 형법")도 후보를 순차 축약하며 실제 법령명을 찾는다.
   let chosen: LawInfo | undefined
+  let fallback: LawInfo | undefined   // 어떤 후보도 looseMatch 실패 시 ⚠ 메시지용 (전체 캡처 기준)
+  // 후보가 하나도 없으면(접미사뿐인 캡처, #70) 검색을 시도하지 않는다 — 시도하면 무관 법령이
+  // 물려오고, 검색 결과가 0이면 ✗ NOT_FOUND 로 낙인돼 '법령명 미상'이 '환각'으로 오보된다.
+  const candidates = lawNameCandidates(cite.lawName)
+  if (candidates.length === 0) {
+    return `⚠ ${inputLabel} — 법령명 불명확 ('${cite.lawName}'은(는) 법령명으로 특정할 수 없음. 앞 문맥에 법령명 명시 필요)`
+  }
   try {
-    // searchDisplay=100: "상법"처럼 짧은 법령명이 부분매칭에 밀려 기본 20건에 안 들어올 때 대비
-    const results = await findLaws(apiClient, cite.lawName, apiKey, 5, 100)
-    if (results.length === 0) {
+    for (const cand of candidates) {
+      // searchDisplay=100: "상법"처럼 짧은 법령명이 부분매칭에 밀려 기본 20건에 안 들어올 때 대비
+      const results = await findLaws(apiClient, cand, apiKey, 5, 100)
+      if (results.length === 0) continue
+      if (!fallback) fallback = results[0]
+      if (looseMatchLawName(cand, results[0].lawName)) {
+        chosen = results[0]
+        break
+      }
+    }
+    if (!fallback) {
+      // 현행(target=law)에 없음 → 폐지된 법령인지 연혁(eflaw)에서 확인.
+      // '지어낸 인용(환각)'과 '실존했으나 폐지된 법령'을 구분(존재≠생존).
+      for (const cand of candidates) {
+        const repealed = await findRepealedLaw(apiClient, cand, apiKey)
+        if (repealed) {
+          const d = formatYmd(repealed.effectiveDate)
+          return `⌛ ${formatCitationLabel(cite, repealed.lawName)} — [REPEALED] 「${repealed.lawName}」은(는) 폐지된 법령입니다(연혁${d ? `, 최종시행 ${d}` : ""}). 실존했으나 현행 법령이 아님 — 후속·대체 법령 확인 필요`
+        }
+      }
       return `✗ ${inputLabel} — [NOT_FOUND] 법제처 DB에 해당 법령 없음 (법령명 오탈자 또는 존재하지 않는 법령)`
     }
-    chosen = results[0]
-
-    // 정확 일치 여부 체크 — findLaws가 정렬은 해도 매칭이 전혀 다른 법령일 수 있음
-    const normalize = (s: string) => s.replace(/\s+/g, "")
-    const targetNorm = normalize(cite.lawName)
-    const officialNorm = normalize(chosen.lawName)
-    const looseMatch = officialNorm === targetNorm
-      || officialNorm.startsWith(targetNorm)
-      || targetNorm.startsWith(officialNorm.replace(/(법률|법)$/, "법"))
-    if (!looseMatch) {
-      return `⚠ ${inputLabel} — 법제처 검색은 '${chosen.lawName}'(으)로만 매칭됨. 법령명 정확성 재확인 필요`
+    if (!chosen) {
+      return `⚠ ${inputLabel} — 법제처 검색은 '${fallback.lawName}'(으)로만 매칭됨. 법령명 정확성 재확인 필요`
     }
   } catch (e) {
     return `⚠ ${inputLabel} — 법령 검색 실패: ${e instanceof Error ? e.message : String(e)}`
@@ -175,6 +310,15 @@ async function verifyOne(
     const joTitle = found.조문제목 ? `(${found.조문제목})` : ""
     const officialLabel = `${chosen.lawName} ${cite.displayArticle}`
 
+    // 내용검증: 인용한 조문 제목이 실제 조문제목과 일치하는지 (lexdiff matchCitationContent 이식).
+    // "존재하는 조문에 엉뚱한 제목 붙인 환각"(예: 제750조(계약해제) ← 실제 불법행위) 탐지.
+    if (cite.claimTitle && found.조문제목) {
+      const cm = matchCitationContent(cite.claimTitle, String(found.조문제목))
+      if (!cm.matched) {
+        return `✗ ${officialLabel} — [CONTENT_MISMATCH] 인용 제목 '${cite.claimTitle}' ≠ 실제 조문제목 '${found.조문제목}' (단순 표기차이 아니면 인용 오류)`
+      }
+    }
+
     if (cite.hang) {
       const rawHang = found.항
       const hangs = toArray<any>(rawHang)
@@ -193,7 +337,7 @@ async function verifyOne(
       return `✗ ${officialLabel}${joTitle} — [NOT_FOUND] 제${cite.hang}항 없음 (최대 제${maxHang}항)`
     }
 
-    return `✓ ${officialLabel}${joTitle} 실존`
+    return `✓ ${officialLabel}${joTitle} 실존${cite.claimTitle ? " · 제목 일치" : ""}`
   } catch (e) {
     return `⚠ ${formatCitationLabel(cite, chosen.lawName)} — 조문 조회 실패: ${e instanceof Error ? e.message : String(e)}`
   }
@@ -222,19 +366,25 @@ export async function verifyCitations(
     const okCount = results.filter((r) => r.startsWith("✓")).length
     const failCount = results.filter((r) => r.startsWith("✗")).length
     const warnCount = results.filter((r) => r.startsWith("⚠")).length
+    const repealedCount = results.filter((r) => r.startsWith("⌛")).length
 
-    // 환각 감지 시 isError=true로 LLM이 "검증 통과"로 오인하지 못하게 차단
+    // 환각 감지 시 isError=true로 LLM이 "검증 통과"로 오인하지 못하게 차단.
+    // 폐지 법령(⌛)은 실존했으므로 환각이 아님 — failCount에 포함되지 않는다.
     const hasHallucination = failCount > 0
 
     const headerMarker = hasHallucination
       ? "[HALLUCINATION_DETECTED] "
-      : warnCount > 0 ? "[PARTIAL_VERIFIED] " : "[VERIFIED] "
-    let output = `${headerMarker}== 인용 검증 결과 ==\n총 ${citations.length}건 | ✓ ${okCount} 실존 | ✗ ${failCount} 오류 | ⚠ ${warnCount} 확인필요\n\n`
+      : repealedCount > 0 ? "[REPEALED_REFERENCE] "
+        : warnCount > 0 ? "[PARTIAL_VERIFIED] " : "[VERIFIED] "
+    let output = `${headerMarker}== 인용 검증 결과 ==\n총 ${citations.length}건 | ✓ ${okCount} 실존 | ✗ ${failCount} 오류 | ⌛ ${repealedCount} 폐지 | ⚠ ${warnCount} 확인필요\n\n`
     for (const line of results) {
       output += `${line}\n`
     }
+    if (repealedCount > 0) {
+      output += `\n⌛ [REPEALED_REFERENCE] ${repealedCount}건은 폐지된 법령(연혁) 인용입니다. 실존했던 법령이라 '환각'은 아니지만 현행이 아니므로, 후속·대체 법령으로 갱신이 필요한지 확인하세요.\n`
+    }
     if (hasHallucination) {
-      output += `\n⚠️ [HALLUCINATION_DETECTED] ${failCount}건 인용이 법제처 DB에 실존하지 않습니다.\n`
+      output += `\n⚠️ [HALLUCINATION_DETECTED] ${failCount}건 인용이 법제처 DB에 실존하지 않거나 인용 내용(조문 제목)이 실제와 불일치합니다.\n`
       output += `   LLM이 지어낸 인용일 가능성이 높습니다. 원문을 수정하거나 사용자에게 '인용 오류'를 명시 보고하세요.\n`
       output += `   절대로 "검증 완료"로 답변하지 마세요.\n`
     }
