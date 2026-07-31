@@ -61,6 +61,19 @@ export function extractHangContent(hangInput: any[] | any): string {
         }
       }
     }
+
+    // 법제처 JSON은 목을 호 아래가 아니라 항의 형제로 준다 (호 객체 키는 호번호·호내용뿐)
+    const hangMokArray = hang.목 ? (Array.isArray(hang.목) ? hang.목 : [hang.목]) : []
+    for (const mok of hangMokArray) {
+      if (!mok || typeof mok !== "object") continue
+
+      if (mok.목내용) {
+        const mokContent = flattenContent(mok.목내용)
+        if (mokContent) {
+          content += "\n" + mokContent
+        }
+      }
+    }
   }
 
   return content
