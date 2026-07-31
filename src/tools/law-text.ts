@@ -203,14 +203,21 @@ export async function getLawText(
         return { content: [{ type: "text", text: out }] }
       }
 
+      // 같은 공포일자에 여러 호가 있다(예: 20251223 제21223호·제21221호).
+      // 8자리면 공포일자, 그 외 숫자면 공포번호로 특정한다.
       const want = String(input.addenda).replace(/[^0-9]/g, "")
-      const hits = buList.filter((b: any) => String(b.부칙공포일자 || "") === want)
+      const byDate = want.length === 8
+      const strip = (v: any) => String(v || "").replace(/^0+/, "")
+      const hits = buList.filter((b: any) =>
+        byDate ? String(b.부칙공포일자 || "") === want : strip(b.부칙공포번호) === strip(want))
       if (hits.length === 0) {
         const recent = buList.slice(-5).reverse().map(label).join(" · ")
-        return { content: [{ type: "text", text: resultText + `공포일자 ${want} 부칙 없음.\n최근 5건: ${recent}\n전체 목록: get_law_text(${idArg}, addenda="list")` }] }
+        const kind = byDate ? "공포일자" : "공포번호"
+        return { content: [{ type: "text", text: resultText + `${kind} ${want} 부칙 없음.\n최근 5건: ${recent}\n전체 목록: get_law_text(${idArg}, addenda="list")` }] }
       }
 
-      let t = resultText + `부칙 ${hits.length}건 (공포일자 ${want})`+ `\n\n`
+      const kindLabel = byDate ? "공포일자" : "공포번호"
+      let t = resultText + `부칙 ${hits.length}건 (${kindLabel} ${want})` + `\n\n`
       for (const b of hits) {
         const body = flattenAddendum(b.부칙내용).join("\n")
         t += `[부칙] ${label(b)}\n${body}\n\n`

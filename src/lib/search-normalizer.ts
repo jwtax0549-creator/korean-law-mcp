@@ -192,6 +192,8 @@ const LAW_ALIAS_ENTRIES: LawAliasEntry[] = [
     aliases: ["소방시설법"],
   },
   // ── 세법 ──
+  // 주의: 법제처 lawSearch 는 약칭 일부만 안다 — 「상증세법」은 totalCnt=3 이지만
+  //       「조특법」·「지특법」은 totalCnt=0 이다(2026-07-31 실측). 여기서 확정 해석한다.
   {
     canonical: "국세기본법",
     aliases: ["국기법"],
@@ -199,6 +201,40 @@ const LAW_ALIAS_ENTRIES: LawAliasEntry[] = [
   {
     canonical: "부가가치세법",
     aliases: ["부가세법"],
+  },
+  {
+    canonical: "조세특례제한법",
+    aliases: ["조특법"],
+    alternatives: ["조세특례제한법 시행령", "조세특례제한법 시행규칙"],
+  },
+  {
+    canonical: "지방세특례제한법",
+    aliases: ["지특법"],
+  },
+  {
+    canonical: "상속세 및 증여세법",
+    aliases: ["상증세법", "상증법"],
+    alternatives: ["상속세 및 증여세법 시행령", "상속세 및 증여세법 시행규칙"],
+  },
+  {
+    canonical: "국세징수법",
+    aliases: ["국징법"],
+  },
+  {
+    canonical: "국제조세조정에 관한 법률",
+    aliases: ["국조법"],
+  },
+  {
+    canonical: "조세범 처벌법",
+    aliases: ["조처법", "조세범처벌법"],
+  },
+  {
+    canonical: "종합부동산세법",
+    aliases: ["종부세법"],
+  },
+  {
+    canonical: "농어촌특별세법",
+    aliases: ["농특세법"],
   },
   // ── 공정거래/소비자 ──
   {
