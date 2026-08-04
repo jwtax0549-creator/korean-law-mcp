@@ -146,17 +146,45 @@ interface PrecedentContent {
   전문?: string
 }
 
+// ★2026-08-04 — 이 서버가 준 편집 문자열이 판시(ratio)처럼 그대로 인용되는 사고가 있었다.
+//   넷 다 「응답 안에 정답이 있는데 표시가 그것을 가리지 않은」 자리다. 새 조회는 하지 않는다.
+
+// ⓐ 이유 본문이 심리불속행 정형문뿐인가 — 그러면 인용할 판시가 이 문서에 없다.
+function hasNoRatio(전문?: string, 판례명?: string): boolean {
+  if (판례명 && 판례명.includes("심리불속행")) return true
+  if (!전문) return false
+  const 이유 = 전문.split(/이\s*유/).pop() ?? ""
+  return /상고심절차에 관한 특례법|상고를 기각하기로 하여/.test(이유) && 이유.replace(/\s+/g, "").length < 800
+}
+
+// ⓑ 전문의 「판 결 선 고」 줄에서 선고일을 뽑는다(YYYYMMDD).
+function 선고일FromBody(전문?: string): string | undefined {
+  if (!전문) return undefined
+  const m = /판\s*결\s*선\s*고\s*\n+\s*(\d{4})\s*[.\-]\s*(\d{1,2})\s*[.\-]\s*(\d{1,2})/.exec(전문)
+  if (!m) return undefined
+  return m[1] + m[2].padStart(2, "0") + m[3].padStart(2, "0")
+}
+
+// ⓒ 원심 사건번호(있으면 실체 법리가 그쪽에 있다).
+function 원심FromBody(전문?: string): string | undefined {
+  if (!전문) return undefined
+  const m = /원\s*심\s*판\s*결\s*\n+\s*([^\n]+)/.exec(전문)
+  return m ? m[1].trim() : undefined
+}
+
 function formatPrecedentText(
   basic: PrecedentBasic,
   content: PrecedentContent,
   full?: boolean
 ): string {
-  let output = `=== ${basic.판례명 || "판례"} ===\n\n`;
+  let output = `=== 사건명(DB 편집 문자열 · 법원의 판시가 아니다): ${basic.판례명 || "판례"} ===\n\n`;
 
   output += `기본 정보:\n`;
   output += `  사건번호: ${basic.사건번호 || "N/A"}\n`;
   output += `  법원: ${basic.법원명 || "N/A"}\n`;
-  output += `  선고일: ${basic.선고일자 || "N/A"}\n`;
+  const 선고일본문 = 선고일FromBody(content.전문);
+  const 선고일불일치 = 선고일본문 && basic.선고일자 && 선고일본문 !== basic.선고일자;
+  output += `  선고일: ${basic.선고일자 || "N/A"}${선고일불일치 ? ` ⚠ 전문의 「판결 선고」는 ${선고일본문} — 불일치. 전문을 믿어라` : ""}\n`;
   output += `  사건종류: ${basic.사건종류명 || "N/A"}\n`;
   output += `  판결유형: ${basic.판결유형 || "N/A"}\n\n`;
 
@@ -165,7 +193,8 @@ function formatPrecedentText(
   }
 
   if (content.판결요지) {
-    output += `판결요지:\n${content.판결요지}\n\n`;
+    const 원심요지 = /^\s*\(원심\s*요지\)/.test(content.판결요지);
+    output += `${원심요지 ? "원심 요지(이 법원의 판시가 아니다)" : "판결요지"}:\n${content.판결요지}\n\n`;
   }
 
   if (content.참조조문) {
@@ -174,6 +203,13 @@ function formatPrecedentText(
 
   if (content.참조판례) {
     output += `참조판례:\n${densifyPrecedentRefs(content.참조판례)}\n\n`;
+  }
+
+  if (hasNoRatio(content.전문, basic.판례명)) {
+    const 원심 = 원심FromBody(content.전문);
+    output += `⚠ 인용할 판시가 이 문서에 없습니다(심리불속행 — 이유는 정형문뿐).\n`;
+    output += `   위 사건명은 DB가 붙인 편집 문자열이고 법원의 문장이 아닙니다. 「대법원이 …라고 판시했다」로 인용하지 마십시오.\n`;
+    output += 원심 ? `   실체 법리는 원심에 있습니다: ${원심}\n\n` : `\n`;
   }
 
   if (content.전문) {
