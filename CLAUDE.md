@@ -1,11 +1,17 @@
 # CLAUDE.md
 
-> ## ⚠️ 배포 — 통합 호스트 (2026-07-02부터)
+> ## ⚠️ 배포 — **이 포크는 자체 컨테이너로 운영한다**
 >
-> 프로덕션은 이 레포가 아니라 **[gomdori-mcp](https://github.com/chrisryugj/gomdori-mcp) 통합 호스트**(fly 앱 `korean-law-mcp` 1대, MCP 5종 동거)가 서빙한다.
-> - 공식 주소: `https://mcp.gomdori.app/law` (구 `korean-law-mcp.fly.dev/mcp`는 하위호환으로 유지)
-> - **반영 절차**: 이 레포 커밋·푸시 → `npm publish` → `~/workspace/gomdori-mcp/Dockerfile`의 `korean-law-mcp@X.Y.Z` 핀 갱신 → `cd ~/workspace/gomdori-mcp && fly deploy -c fly.production.toml`
-> - **🚫 이 레포에서 `fly deploy` 직접 실행 절대 금지** — 통합 이미지를 law 단독 이미지로 덮어써 stats·patent·archhub·school까지 전부 죽는다. 자세한 배경: [docs/FLY-COST.md](docs/FLY-COST.md)
+> **이 저장소에서 배포 명령을 실행하지 마라.** 배포 절차·좌표·검증·롤백은 **이 저장소 밖의 운영 런북**에 있다. 담당자에게 확인하라.
+> - `npm publish` 하지 않는다. `fly deploy`·`flyctl` 을 쓰지 않는다. 이 포크의 이미지는 **저장소 트리에서 직접 빌드**된다.
+> - 그러므로 **push 와 배포는 다른 사건이다** — push 해도 재빌드 전에는 라이브가 안 바뀌고, 반대도 성립한다.
+>
+> ### ★아래 서술은 **상류(upstream)의 것**이다 — 이 포크에 적용되지 않는다
+>
+> 상류 [chrisryugj/korean-law-mcp](https://github.com/chrisryugj/korean-law-mcp) 는 통합 호스트(fly)로 서빙한다.
+> 그 구조를 설명하는 파일들이 이 트리에 **상류에서 그대로 따라와 있고, 일부러 지우지 않았다**(지우면 상류 머지마다 되살아난다):
+> `fly.toml.disabled` · `docs/FLY-COST.md` · `docs/ARCHITECTURE.md`(Remote 절) · `docs/DEVELOPMENT.md`(Fly.io 절) · `.claude/next-sessions.md`
+> **읽되 우리 절차로 읽지 마라.** `.claude/commands/deploy.md` 도 같은 취지의 경고만 남겨 두었다.
 
 Korean Law MCP Server v4.9.1 - 법제처 42개 API → 10개 통합 도구 (내부 98개) + 9개 시나리오 + 자연어 CLI + HTTP stateless + 판례 토큰 74% 감축 + **legal_research (체인 8종 통합, task 파라미터)** + **legal_analysis (인용검증·판례생사·행위시법·영향그래프 통합, mode 파라미터)** + **time_travel (시점 diff)** + **action_plan (이럴 땐 이렇게, 5단계 안내)** + **시행예정 감지 (search_law가 제명변경·미시행 개정 자동 병기)** + **ordinance_radar (조례 정비 레이더 — 근거 상위법 개정 자동 대조, v4.7.0)** + **인용 검증 표기 내성 (낫표·가운뎃점·`같은 법` 조응, v4.9.0)**
 
