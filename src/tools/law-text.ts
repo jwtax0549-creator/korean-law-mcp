@@ -26,6 +26,62 @@ export const GetLawTextSchema = z.object({
 
 export type GetLawTextInput = z.infer<typeof GetLawTextSchema>
 
+/** 부칙 조문의 **자기 머리**(`제2조(적용례)`) — 본문의 조문 참조와 같은 모양이라 먼저 떼어낸다 */
+const ADDENDUM_OWN_HEADER = /^\s*(제\d+조(?:의\d+)?\s*(?:\([^)]*\))?)\s*/;
+/** 다른 법령의 조문(`「법인세법 시행령」 제39조제1항`) — 이 법령의 조문이 아니다 */
+const FOREIGN_ARTICLE = /「[^」]*」\s*제\d+조(?:의\d+)?/g;
+const ARTICLE_REF = /제(\d+)조(?:의(\d+))?/g;
+/** ★적용례·경과조치를 가르는 두 신호. **줄의 문언만 보면 옛 부칙을 통째로 놓친다**
+ *  (2026-08-11 실측: 「개정규정」만 보면 조문을 든 줄의 20~27%가 샜고, 그 안에
+ *   `제4조(…에 관한 적용례) 제16조제1항제11호의 규정은 …` 같은 진짜가 들어 있었다 — 옛 판은 「개정」을 안 쓴다). */
+const ADDENDUM_KIND = /적용례|경과조치|특례|의제|적용시기/;
+const ADDENDUM_ANCHOR = /개정규정|종전의 규정/;
+/** 자구정비뿐이라 이 조문의 적용시기를 바꾸지 않는다 */
+const OTHER_LAW_AMEND = /다른 법[령률]의 개정/;
+
+/**
+ * 부칙에서 **이 법령의 어느 조문을 건드리는가**를 뽑아 역인덱스를 만든다.
+ * 키는 `제16조`·`제2조의2` 꼴이고, 값은 사람이 읽을 수 있는 출처 한 줄이다.
+ *
+ * ★조문 하나만 읽고 부칙을 안 보면 적용례를 통째로 놓친다 — 그것 하나로 결론이 뒤집힌 사례가 있다.
+ * ★모집단을 「개정규정·종전의 규정이 있는 줄」로 좁힌다(2026-08-11 실측): 그 문언이 없는 조문 나열은
+ *   「다른 법령의 개정」식 일괄 자구정비라 이 조문의 적용시기를 바꾸지 않는다.
+ */
+export function buildAddendaIndex(
+  buList: any[],
+  flatten: (x: any) => string[],
+  known?: Set<string>
+): Record<string, string[]> {
+  const idx: Record<string, string[]> = {};
+  for (const b of buList) {
+    const label = `${b?.부칙공포일자 || "?"} 제${b?.부칙공포번호 || "?"}호`;
+    let ownHeader = "";
+    for (const rawLine of flatten(b?.부칙내용)) {
+      const line = String(rawLine).trim();
+      if (!line) continue;
+      const own = line.match(ADDENDUM_OWN_HEADER);
+      if (own) ownHeader = own[1].trim();
+      if (OTHER_LAW_AMEND.test(ownHeader)) continue;
+      if (!ADDENDUM_KIND.test(ownHeader) && !ADDENDUM_ANCHOR.test(line)) continue;
+      const rest = (own ? line.slice(own[0].length) : line).replace(FOREIGN_ARTICLE, "");
+      const seen = new Set<string>();
+      let m: RegExpExecArray | null;
+      ARTICLE_REF.lastIndex = 0;
+      while ((m = ARTICLE_REF.exec(rest)) !== null) {
+        const key = m[2] ? `제${m[1]}조의${m[2]}` : `제${m[1]}조`;
+        // ★부칙은 모법(母法)·타법 조문도 같은 모양으로 인용한다 — 이 법령에 없는 번호는 버린다
+        if (known && !known.has(key)) continue;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const entry = ownHeader ? `${label} ${ownHeader}` : label;
+        (idx[key] ||= []).push(entry);
+      }
+    }
+  }
+  return idx;
+}
+
+
 export async function getLawText(
   apiClient: LawApiClient,
   input: GetLawTextInput
@@ -183,6 +239,28 @@ export async function getLawText(
       }
     }
 
+    /** 조문단위 → `제16조`·`제2조의2` 키 */
+    const articleKeyOf = (u: any): string => {
+      const n = parseInt(u?.조문번호, 10)
+      if (isNaN(n)) return ""
+      const br = parseInt(u?.조문가지번호, 10)
+      return br ? `제${n}조의${br}` : `제${n}조`
+    }
+    const addendaIdxKey = `addenda-idx:${input.mst || input.lawId}:${input.efYd || "current"}`
+
+    // ★부칙은 **전문 조회 응답에만** 실려 온다(jo 지정 시 최상위에 없다). 그래서 전문/목차를 부르는
+    //   이 자리에서 역인덱스를 만들어 캐시해 두고, 조문 조회 때 꺼내 쓴다 — 추가 요청 0.
+    if (!input.jo) {
+      const buRawIdx = lawData.부칙?.부칙단위
+      const buListIdx: any[] = buRawIdx ? (Array.isArray(buRawIdx) ? buRawIdx : [buRawIdx]) : []
+      if (buListIdx.length > 0) {
+        const known = new Set(
+          articleUnits.filter(u => u.조문여부 === "조문").map(articleKeyOf).filter(Boolean)
+        )
+        lawCache.set(addendaIdxKey, JSON.stringify(buildAddendaIndex(buListIdx, flattenAddendum, known)))
+      }
+    }
+
     // 부칙 조회 — lawData.부칙 은 지금까지 아무도 읽지 않았다(경과조치 확인 경로가 막혀 있었다)
     if (input.addenda) {
       const buRaw = lawData.부칙?.부칙단위
@@ -280,6 +358,24 @@ export async function getLawText(
       // 민법 의사표시 하자 조문(107~110)에 전략 경고 주입
       const warning = getStrategyWarning(lawName, unit.조문번호 || "", unit.조문가지번호 || "")
       if (warning) resultText += `${warning}\n\n`
+    }
+
+    // ★조문만 읽고 부칙을 안 보면 적용례를 통째로 놓친다 — 그것 하나로 결론이 뒤집힐 수 있다.
+    if (input.jo) {
+      const idArgJo = input.mst ? `mst="${input.mst}"` : `lawId="${input.lawId}"`
+      const cachedIdx = lawCache.get<string>(addendaIdxKey)
+      if (cachedIdx) {
+        const idx: Record<string, string[]> = JSON.parse(cachedIdx)
+        const keys = articleUnits.filter(u => u.조문여부 === "조문").map(articleKeyOf).filter(Boolean)
+        const hits = [...new Set(keys.flatMap(k => idx[k] || []))]
+        if (hits.length > 0) {
+          resultText += `※ 이 조문에 걸린 부칙 ${hits.length}건(적용례·경과조치) — 하나만 보고 인용하면 반대 방향을 놓칩니다.\n`
+          resultText += hits.map(h => `   · ${h}`).join("\n") + `\n`
+          resultText += `   본문: get_law_text(${idArgJo}, addenda="YYYYMMDD")  ※ 위 목록 앞의 8자리가 그 날짜입니다.\n\n`
+        }
+      } else {
+        resultText += `※ 이 조문에 걸린 부칙(적용례·경과조치)은 이 응답에 실리지 않습니다 — get_law_text(${idArgJo})로 목차를 먼저 부르면 조문 조회에 함께 표시됩니다.\n\n`
+      }
     }
 
     // 응답 크기 제한 - 조문 경계에서 자르기 (mid-article 절단 방지)
