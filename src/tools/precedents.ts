@@ -169,10 +169,52 @@ interface PrecedentContent {
 //
 //   ★판례명 판정도 고쳤다 — 표본에 **「(심리 불속행)」(띄어쓰기)**이 있었고 `includes`가 그걸 놓쳤다.
 //    지금은 ⓨ가 우연히 받아 주고 있어 안 드러났을 뿐이다.
+//   ★★2026-08-11 2차 — **전문 전체를 재던 것도 틀렸다.** 위 8표본이 전부 짧아 그 위험을 못 봤다.
+//    `2017두48505`(precSeq 421636)는 **진짜 심리불속행인데 전문이 10,301자**다 — DB 레코드가 `---------`
+//    뒤에 **원심 본문을 통째로 덧붙이기** 때문이다. 길이 벨트가 그 덧붙은 글을 세서 진짜를 놓쳤다.
+//    ★옛 판정(`.pop()`)도 이 건을 놓쳤으므로 1차 수정이 만든 회귀가 아니라 **원래 있던 구멍**이다.
+//    ⇒ **재는 대상을 「전문」이 아니라 「이유 구획」으로 바꾼다**(그게 애초에 이 판정의 뜻이었다).
+//    표본 13건 같은 자 실측 — 이유 구획(공백 제거): 진짜 **129~353** ↔ 아님 **1,585~4,670**.
+//      옛 판정 3건 오답(놓침 1 · 오탐 2) · 전문 전체 1건 오답(놓침 1) · **이유 구획 0건 오답**.
 export function hasNoRatio(전문?: string, 판례명?: string): boolean {
   if (판례명 && /심리\s*불속행/.test(판례명)) return true
   if (!전문) return false
-  return /상고심절차에 관한 특례법/.test(전문) && 전문.replace(/\s+/g, "").length < 800
+  const 이유 = reasonSection(전문)
+  if (이유 === null) return false // 표제를 못 찾으면 판정하지 않는다(추측 금지 — 경고는 인용을 막는다)
+  return /상고심절차에 관한 특례법/.test(이유) && 이유.replace(/\s+/g, "").length < 800
+}
+
+/** 전문에서 **이유 구획**만 잘라낸다(순수). 표제가 없으면 null.
+ *  ★`split(…).pop()`을 쓰지 마라 — 「이유」는 본문 곳곳에 나오고(「상고이유」·「이유 없다」) 마지막 조각은
+ *   맺음말 한 문단이다. **첫 표제 이후**를 취한다.
+ *  ★`-----` 이후는 버린다 — 이 DB는 대법원 판결 뒤에 **원심 본문을 덧붙여** 싣는다(실측: 421636에서 145자
+ *   짜리 이유 뒤에 10,000자가 더 붙어 있다). 그 글은 이 법원의 이유가 아니다. */
+export function reasonSection(전문: string): string | null {
+  const m = /【\s*이\s*유\s*】|이\s{2,}유|\n\s*이\s*유\s*\n/.exec(전문)
+  if (!m) return null
+  const tail = 전문.slice(m.index + m[0].length)
+  const cut = /-{5,}/.exec(tail)
+  return cut ? tail.slice(0, cut.index) : tail
+}
+
+/** 전문에서 **주문 구획**만 잘라낸다(순수). 표제가 없으면 null. */
+export function dispositionSection(전문: string): string | null {
+  const m = /【\s*주\s*문\s*】|주\s{2,}문/.exec(전문)
+  if (!m) return null
+  const tail = 전문.slice(m.index + m[0].length)
+  const end = /【\s*이\s*유\s*】|이\s{2,}유|-{5,}/.exec(tail)
+  return (end ? tail.slice(0, end.index) : tail).trim()
+}
+
+/** 주문이 원심을 파기했는가(순수) — **읽는 쪽이 「판결유형」만 보면 알 수 없다.**
+ *  ★DB의 `판결유형`은 상고심 승패 표기라 **파기환송도 「처분청승소」로 찍힌다**(실측 요청 근거).
+ *   그래서 「…라고 판시했다」로 단정한 인용이 실제로 나갔다 — 그 사건은 결론이 확정된 것이 아니다.
+ *  ★판단하지 않고 **주문 문언 한 줄**을 얹는다. 파기 뒤 환송인지 자판인지는 주문이 스스로 말한다. */
+export function reversalFlag(전문?: string): { reversed: boolean; remanded: boolean; text: string } {
+  const d = 전문 ? dispositionSection(전문) : null
+  if (!d) return { reversed: false, remanded: false, text: "" }
+  const flat = d.replace(/<br\s*\/?>/gi, " ").replace(/\s+/g, " ").trim()
+  return { reversed: /파기/.test(flat), remanded: /환송/.test(flat), text: flat }
 }
 
 // ⓑ 전문의 「판 결 선 고」 줄에서 선고일을 뽑는다(YYYYMMDD).
@@ -228,6 +270,14 @@ function formatPrecedentText(
     output += `⚠ 인용할 판시가 이 문서에 없습니다(심리불속행 — 이유는 정형문뿐).\n`;
     output += `   위 사건명은 DB가 붙인 편집 문자열이고 법원의 문장이 아닙니다. 「대법원이 …라고 판시했다」로 인용하지 마십시오.\n`;
     output += 원심 ? `   실체 법리는 원심에 있습니다: ${원심}\n\n` : `\n`;
+  }
+
+  // ★파기 표시 — 「판결유형」이 말하지 않는 것. 판단하지 않고 주문 문언을 그대로 얹는다.
+  const rev = reversalFlag(content.전문);
+  if (rev.reversed) {
+    output += `⚠ 파기${rev.remanded ? "환송" : "자판"} — 이 판결로 결론이 확정된 것이 아닙니다${rev.remanded ? "(환송심 미대조)" : ""}.\n`;
+    output += `   위 「판결유형」은 상고심 승패 표기이고 주문의 파기 여부를 말하지 않습니다.\n`;
+    output += `   주문: ${rev.text.slice(0, 200)}\n\n`;
   }
 
   if (content.전문) {
