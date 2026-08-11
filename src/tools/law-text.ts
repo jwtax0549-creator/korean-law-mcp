@@ -104,8 +104,14 @@ export async function getLawText(
       }
     }
 
+    // ★부칙 역인덱스는 **목차 조회 때** 적재된다. 그 전에 부른 조문 응답은 「부칙은 이 응답에 실리지
+    //   않습니다」 안내를 담고 캐시되는데, 캐시 키가 적재 여부를 모르면 **목차를 부른 뒤에도 그 안내가
+    //   그대로 돌아온다.** 2026-08-11 라이브 첫 사용에서 실제로 밟았다(안내대로 목차를 불렀는데 안 바뀌었다).
+    const addendaIdxKey = `addenda-idx:${input.mst || input.lawId}:${input.efYd || "current"}`
+    const addendaIdxState = lawCache.get<string>(addendaIdxKey) ? "idx" : "noidx"
+
     // Check cache first (efYd 정규화: 미지정 → 'current'로 통일)
-    const cacheKey = `lawtext:${input.mst || input.lawId}:${joCode || 'full'}:${input.efYd || 'current'}:${input.addenda || ''}`
+    const cacheKey = `lawtext:${input.mst || input.lawId}:${joCode || 'full'}:${input.efYd || 'current'}:${input.addenda || ''}:${addendaIdxState}`
     const cached = lawCache.get<string>(cacheKey)
     if (cached) {
       return {
@@ -246,8 +252,6 @@ export async function getLawText(
       const br = parseInt(u?.조문가지번호, 10)
       return br ? `제${n}조의${br}` : `제${n}조`
     }
-    const addendaIdxKey = `addenda-idx:${input.mst || input.lawId}:${input.efYd || "current"}`
-
     // ★부칙은 **전문 조회 응답에만** 실려 온다(jo 지정 시 최상위에 없다). 그래서 전문/목차를 부르는
     //   이 자리에서 역인덱스를 만들어 캐시해 두고, 조문 조회 때 꺼내 쓴다 — 추가 요청 0.
     if (!input.jo) {
