@@ -28,6 +28,47 @@ function extractNtstDcmId(link: string | undefined): string {
   }
 }
 
+/**
+ * 회신에 통째로 붙은 「다른 문서」의 머리줄. 실물에서 확인된 모양(2026-08-11 · 303건 스윕):
+ *   `○ 부가46015-1221, 1999.04.24`      `[서면3팀-586, 2005.05.02]`
+ *   `○ 법인세과-433 (2012.06.29)`        ← 날짜가 괄호 안
+ *   `○ 서면-2018-법령해석부가-1462, 2018.6.28.`  ← 문서번호에 하이픈이 여럿
+ *   ` ○ 재정경제부 부가가치세제과-265, 2006.11.29` ← 기관명이 앞에 붙어 공백 포함
+ *   `▪ 서면-2015-법령해석부가-0770 , 2015.06.30`  `■ 부가1235-3410, …`  `* 법인46012-3131, …`
+ *   `※ 부가가치세법기본통칙 2-0-1 【납세의무】`  ← 예규가 아니라 통칙을 실은 것
+ * ★글머리 기호는 열거하지 않는다 — 실물에서 ○ ● ※ ▪ ■ * 가 나왔고 더 있을 것이다.
+ * ★줄 전체가 인용표시여야 한다 — 문장 안 괄호(`…(부가46015-4306,1999.10.25)과 …`)는 잡으면 안 된다.
+ */
+const QUOTED_DOC_HEADER = /^[^가-힣A-Za-z0-9[]*\[?\s*([가-힣A-Za-z][가-힣A-Za-z0-9 ]*(?:-[가-힣A-Za-z0-9 ]+)*-\d+)\s*[,，]?\s*(?:\(?\s*\d{4}\s*[.-]\s*\d{1,2}\s*[.-]\s*\d{1,2}\.?\s*\)?)?\s*(?:【[^】]*】)?\s*[.\]]?$/;
+
+/** 머리줄 뒤에 「본문」이라 부를 만한 분량이 따라와야 실린 것으로 본다 */
+const QUOTED_BODY_MIN_CHARS = 50;
+
+/**
+ * 국세청 회신 본문에 **다른 문서의 본문이 함께 실렸는지** 판정해 그 문서번호를 돌려준다.
+ *
+ * ★판별 축은 「참조하시기 바람」 같은 낱말이 아니다 — 그 낱말은 자기 판단을 말한 회신에도 흔히 붙는다.
+ *   실제로 틀린 자리는 **남의 문장을 이 예규의 판단으로 인용한 것**이라, 재야 할 것은
+ *   「다른 문서의 본문이 여기 실려 있는가」다(2026-08-11 · 실물 표본 3건으로 축을 정했다).
+ */
+export function findQuotedDocuments(reply: string): string[] {
+  const lines = reply.split("\n");
+  const found: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].trim().match(QUOTED_DOC_HEADER);
+    if (!m) continue;
+    // 다음 머리줄 전까지가 그 문서의 본문 — 머리줄만 늘어선 인용 목록은 여기서 걸러진다
+    let body = "";
+    for (let j = i + 1; j < lines.length; j++) {
+      if (QUOTED_DOC_HEADER.test(lines[j].trim())) break;
+      body += lines[j];
+    }
+    if (body.replace(/\s/g, "").length < QUOTED_BODY_MIN_CHARS) continue;
+    if (!found.includes(m[1])) found.push(m[1]);
+  }
+  return found;
+}
+
 // Customs legal interpretation search tool - Search for customs law interpretations
 export const searchCustomsInterpretationsSchema = z.object({
   query: z.string().optional().describe("Search keyword (e.g., '거래명세서', '세금')"),
@@ -217,6 +258,15 @@ export async function getNtsInterpretationText(
     }
 
     if (reply) {
+      // ★2026-08-11 — 회신이 「기존 해석사례를 참조하시기 바람」뿐이고 그 참조 문서의 본문이 뒤에 통째로
+      //   붙어 오는 예규가 있다. 그 문장을 **이 예규의 판단으로** 인용한 사례가 실제로 발생했다.
+      const quoted = findQuotedDocuments(reply);
+      if (quoted.length > 0) {
+        const refs = quoted.join(", ");
+        output += `★참조 회신 — 아래 「회신」에는 다른 문서(${refs})의 본문이 함께 실려 있습니다.\n`;
+        output += `   그 부분의 실질 판단은 그 문서의 것입니다. 근거로 인용할 때는 이 문서번호가 아니라\n`;
+        output += `   해당 문서(${refs})를 따로 조회해 그 문서로 인용하십시오.\n\n`;
+      }
       output += `회신:\n${reply}\n\n`;
     }
 
